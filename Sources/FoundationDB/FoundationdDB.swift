@@ -388,3 +388,73 @@ extension TransactionProtocol {
         try setOption(to: valueBytes, forOption: option)
     }
 }
+
+// MARK: - Write Conflict Range Optimization
+
+extension TransactionProtocol {
+    /// Exclude the next write operation from write conflict checking.
+    ///
+    /// This is useful when clearing old data that should not cause conflicts with other transactions.
+    /// The option applies only to the next write operation.
+    ///
+    /// **Python equivalent:**
+    /// ```python
+    /// tr.options.set_next_write_no_write_conflict_range()
+    /// ```
+    ///
+    /// **Java equivalent:**
+    /// ```java
+    /// tr.options().setNextWriteNoWriteConflictRange();
+    /// ```
+    ///
+    /// - Throws: `FDBError` if the option cannot be set.
+    public func setNextWriteNoWriteConflictRange() throws {
+        try setOption(forOption: .nextWriteNoWriteConflictRange)
+    }
+
+    /// Add a single key to the transaction's write conflict range.
+    ///
+    /// This is used to explicitly mark a key that should be checked for conflicts,
+    /// typically after using `setNextWriteNoWriteConflictRange()`.
+    ///
+    /// **Python equivalent:**
+    /// ```python
+    /// tr.add_write_conflict_key(key)
+    /// ```
+    ///
+    /// **Java equivalent:**
+    /// ```java
+    /// tr.addWriteConflictKey(key);
+    /// ```
+    ///
+    /// - Parameter key: The key to add to the write conflict range.
+    /// - Throws: `FDBError` if the operation fails.
+    public func addWriteConflictKey(_ key: FDB.Bytes) throws {
+        // Add a conflict range with begin=key, end=key+\x00
+        var endKey = key
+        endKey.append(0x00)
+        try addConflictRange(beginKey: key, endKey: endKey, type: .write)
+    }
+
+    /// Add a range to the transaction's write conflict range.
+    ///
+    /// This is used to explicitly mark a range that should be checked for conflicts.
+    ///
+    /// **Python equivalent:**
+    /// ```python
+    /// tr.add_write_conflict_range(begin_key, end_key)
+    /// ```
+    ///
+    /// **Java equivalent:**
+    /// ```java
+    /// tr.addWriteConflictRange(beginKey, endKey);
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - beginKey: The start of the range (inclusive).
+    ///   - endKey: The end of the range (exclusive).
+    /// - Throws: `FDBError` if the operation fails.
+    public func addWriteConflictRange(beginKey: FDB.Bytes, endKey: FDB.Bytes) throws {
+        try addConflictRange(beginKey: beginKey, endKey: endKey, type: .write)
+    }
+}

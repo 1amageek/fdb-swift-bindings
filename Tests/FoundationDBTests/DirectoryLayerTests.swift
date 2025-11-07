@@ -657,4 +657,83 @@ struct DirectoryLayerTests {
         )
         #expect(ordersChildrenAfterRemove.isEmpty)
     }
+
+    // MARK: - Bug Fix Regression Tests
+
+    @Test("Move preserves prefix correctness on reopen")
+    func movePrefixCorrectness() async throws {
+        let directoryLayer = makeDirectoryLayer(name: "movePrefixCorrectness")
+
+        // Create a directory
+        let original = try await directoryLayer.createOrOpen(path: ["old", "dir"])
+        let originalPrefix = original.prefix
+
+        // Write some data
+        try await database.withTransaction { transaction in
+            let key = original.subspace.pack(Tuple("test"))
+            transaction.setValue([0x42], for: Array(key))
+        }
+
+        // Move the directory
+        let moved = try await directoryLayer.move(
+            oldPath: ["old", "dir"],
+            newPath: ["new", "dir"]
+        )
+
+        // Verify prefix is preserved (move doesn't change prefix)
+        #expect(moved.prefix == originalPrefix)
+
+        // Verify reopening returns same prefix
+        let reopened = try await directoryLayer.open(path: ["new", "dir"])
+        #expect(
+            reopened.prefix == originalPrefix,
+            "Reopened directory should have same prefix, not doubled"
+        )
+
+        // Verify data is still accessible
+        let dataExists = try await database.withTransaction { transaction in
+            let key = reopened.subspace.pack(Tuple("test"))
+            let value = try await transaction.getValue(for: Array(key), snapshot: false)
+            return value != nil
+        }
+        #expect(dataExists, "Data should be accessible after move and reopen")
+    }
+
+    @Test("Remove partition root cleans up parent entry")
+    func removePartitionRootCleansUpParent() async throws {
+        let directoryLayer = makeDirectoryLayer(name: "removePartitionRoot")
+
+        // Create a partition
+        _ = try await directoryLayer.createOrOpen(
+            path: ["tenants", "tenant-1"],
+            type: .partition
+        )
+
+        // Create a subdirectory inside the partition
+        _ = try await directoryLayer.createOrOpen(
+            path: ["tenants", "tenant-1", "data"]
+        )
+
+        // List parent before removal
+        let tenantsBeforeRemove = try await directoryLayer.list(path: ["tenants"])
+        #expect(
+            tenantsBeforeRemove.contains("tenant-1"),
+            "tenant-1 should exist before removal"
+        )
+
+        // Remove the partition root
+        try await directoryLayer.remove(path: ["tenants", "tenant-1"])
+
+        // Verify parent no longer lists the removed partition
+        let tenantsAfterRemove = try await directoryLayer.list(path: ["tenants"])
+        #expect(
+            !tenantsAfterRemove.contains("tenant-1"),
+            "tenant-1 should be removed from parent's list"
+        )
+
+        // Verify opening the removed partition fails
+        await #expect(throws: DirectoryError.self) {
+            _ = try await directoryLayer.open(path: ["tenants", "tenant-1"])
+        }
+    }
 }

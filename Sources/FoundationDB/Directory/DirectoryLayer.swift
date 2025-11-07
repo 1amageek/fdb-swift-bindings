@@ -342,8 +342,18 @@ public final class DirectoryLayer: Sendable {
             let newSubdirectoryKey = newParentMetadata
                 .subspace(Self.subdirs)
                 .pack(Tuple(newDirectoryName))
+
+            // Convert absolute prefix to relative before storing in metadata.
+            // resolve() returns absolute prefix, but metadata stores relative prefix.
+            let relativePrefix: FDB.Bytes
+            if !contentSubspace.prefix.isEmpty && oldNode.prefix.starts(with: contentSubspace.prefix) {
+                relativePrefix = Array(oldNode.prefix.dropFirst(contentSubspace.prefix.count))
+            } else {
+                relativePrefix = oldNode.prefix
+            }
+
             transaction.setValue(
-                Array(oldNode.prefix),
+                Array(relativePrefix),
                 for: Array(newSubdirectoryKey)
             )
 
@@ -388,6 +398,26 @@ public final class DirectoryLayer: Sendable {
                 transaction: transaction,
                 path: pathInPartition
             )
+
+            // When removing the partition root itself (pathInPartition is empty),
+            // clean up the parent's reference to this partition.
+            // The partition layer cleaned up its own metadata, but cannot access
+            // the parent layer's metadata.
+            if pathInPartition.isEmpty && !path.isEmpty {
+                let parentPath = Array(path.dropLast())
+                let directoryName = path.last!
+
+                guard let parentDirectory = try await self.resolve(transaction: transaction, path: parentPath) else {
+                    return
+                }
+
+                let parentMetadata = try await getMetadata(transaction: transaction, for: parentDirectory)
+                let subdirectoryKey = parentMetadata
+                    .subspace(Self.subdirs)
+                    .pack(Tuple(directoryName))
+                transaction.clear(key: Array(subdirectoryKey))
+            }
+
             return
         }
 

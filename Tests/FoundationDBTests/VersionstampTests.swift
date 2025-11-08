@@ -294,10 +294,10 @@ struct VersionstampTests {
         let tuple = Tuple("prefix", original, "suffix")
 
         // Encode
-        let encoded = tuple.encode()
+        let encoded = tuple.pack()
 
-        // Decode through Tuple.decode()
-        let decoded = try Tuple.decode(from: encoded)
+        // Decode through Tuple.unpack()
+        let decoded = try Tuple.unpack(from: encoded)
 
         #expect(decoded.count == 3)
         #expect((decoded[0] as? String) == "prefix")
@@ -311,10 +311,10 @@ struct VersionstampTests {
         let tuple = Tuple(original)
 
         // Encode
-        let encoded = tuple.encode()
+        let encoded = tuple.pack()
 
         // Decode
-        let decoded = try Tuple.decode(from: encoded)
+        let decoded = try Tuple.unpack(from: encoded)
 
         #expect(decoded.count == 1)
         let decodedVS = decoded[0] as? Versionstamp
@@ -337,8 +337,8 @@ struct VersionstampTests {
             [UInt8]([0x01, 0x02, 0x03])
         )
 
-        let encoded = tuple.encode()
-        let decoded = try Tuple.decode(from: encoded)
+        let encoded = tuple.pack()
+        let decoded = try Tuple.unpack(from: encoded)
 
         #expect(decoded.count == 5)
         #expect((decoded[0] as? String) == "string")
@@ -356,7 +356,7 @@ struct VersionstampTests {
         ]
 
         do {
-            _ = try Tuple.decode(from: encoded)
+            _ = try Tuple.unpack(from: encoded)
             Issue.record("Should throw error for insufficient bytes")
         } catch {
             // Expected - should throw TupleError.invalidEncoding
@@ -373,8 +373,8 @@ struct VersionstampTests {
         )
         let tuple = Tuple(vs1, "middle", vs2)
 
-        let encoded = tuple.encode()
-        let decoded = try Tuple.decode(from: encoded)
+        let encoded = tuple.pack()
+        let decoded = try Tuple.unpack(from: encoded)
 
         #expect(decoded.count == 3)
         #expect((decoded[0] as? Versionstamp) == vs1)

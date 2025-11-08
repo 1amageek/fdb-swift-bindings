@@ -109,7 +109,7 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
         var bytes = transactionVersion ?? Self.incompletePlaceholder
 
         // User version is stored as big-endian
-        bytes.append(contentsOf: withUnsafeBytes(of: userVersion.bigEndian) { Array($0) })
+        withUnsafeBytes(of: userVersion.bigEndian) { bytes.append(contentsOf: $0) }
 
         return bytes
     }
@@ -140,16 +140,7 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
     }
 
     // MARK: - Hashable & Equatable
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(transactionVersion)
-        hasher.combine(userVersion)
-    }
-
-    public static func == (lhs: Versionstamp, rhs: Versionstamp) -> Bool {
-        return lhs.transactionVersion == rhs.transactionVersion &&
-               lhs.userVersion == rhs.userVersion
-    }
+    // Compiler-synthesized implementations
 
     // MARK: - Comparable
 

@@ -32,8 +32,8 @@ import Foundation
 /// ## Example Usage
 ///
 /// ```swift
-/// // Create a root subspace
-/// let userSpace = Subspace(rootPrefix: "users")
+/// // Create a root subspace with tuple-encoded prefix
+/// let userSpace = Subspace(prefix: Tuple("users").pack())
 ///
 /// // Create nested subspaces
 /// let activeUsers = userSpace.subspace("active")
@@ -51,6 +51,12 @@ public struct Subspace: Sendable {
     // MARK: - Initialization
 
     /// Create a subspace with a binary prefix
+    ///
+    /// In production code, prefixes should typically be obtained from the Directory Layer,
+    /// which manages namespaces and prevents collisions. This initializer is provided for:
+    /// - Testing and development
+    /// - Integration with existing systems that manage prefixes externally
+    /// - Special system prefixes (e.g., DirectoryLayer internal keys)
     ///
     /// - Warning: Subspace is primarily designed for tuple-encoded prefixes.
     ///   Using raw binary prefixes may result in range queries that do not
@@ -72,31 +78,19 @@ public struct Subspace: Sendable {
     ///   // because they are > [0x01, 0xFF, 0xFF] in lexicographical order
     ///   ```
     ///
-    /// - Important: For tuple-encoded data (created via `init(rootPrefix:)` or
-    ///   `subspace(_:)`), this limitation does not apply because tuple type codes
-    ///   never include 0xFF.
+    /// - Important: For tuple-encoded data (created via `subspace(_:)`),
+    ///   this limitation does not apply because tuple type codes never include 0xFF.
     ///
     /// - Note: This behavior matches the official Java, C++, Python, and Go
     ///   implementations. A subspace formed with a raw byte string as a prefix
     ///   is not fully compatible with the tuple layer, and keys stored within it
     ///   cannot be unpacked as tuples unless they were originally tuple-encoded.
     ///
-    /// - Recommendation: Use `init(rootPrefix:)` for tuple-encoded data whenever
-    ///   possible. Reserve this initializer for special cases like system
-    ///   prefixes (e.g., DirectoryLayer internal keys).
-    ///
     /// - Parameter prefix: The binary prefix
     ///
     /// - SeeAlso: https://apple.github.io/foundationdb/developer-guide.html#subspaces
     public init(prefix: FDB.Bytes) {
         self.prefix = prefix
-    }
-
-    /// Create a subspace with a string prefix
-    /// - Parameter rootPrefix: The string prefix (will be encoded as a Tuple)
-    public init(rootPrefix: String) {
-        let tuple = Tuple(rootPrefix)
-        self.prefix = tuple.encode()
     }
 
     // MARK: - Subspace Creation
@@ -108,39 +102,59 @@ public struct Subspace: Sendable {
     /// ## Example
     ///
     /// ```swift
-    /// let users = Subspace(rootPrefix: "users")
+    /// let users = Subspace(prefix: Tuple("users").pack())
     /// let activeUsers = users.subspace("active")  // prefix = users + "active"
     /// let userById = activeUsers.subspace(12345)  // prefix = users + "active" + 12345
     /// ```
     public func subspace(_ elements: any TupleElement...) -> Subspace {
         let tuple = Tuple(elements)
-        return Subspace(prefix: prefix + tuple.encode())
+        return Subspace(prefix: prefix + tuple.pack())
+    }
+
+    /// Create a nested subspace using subscript syntax
+    /// - Parameter elements: Tuple elements to append
+    /// - Returns: A new subspace with the extended prefix
+    ///
+    /// This provides convenient subscript access for creating nested subspaces,
+    /// matching Python's `__getitem__` pattern.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// let root = Subspace(prefix: Tuple("app").pack())
+    /// let users = root["users"]
+    /// let activeUsers = root["users"]["active"]
+    /// // Equivalent to: root.subspace("users").subspace("active")
+    /// ```
+    public subscript(_ elements: any TupleElement...) -> Subspace {
+        let tuple = Tuple(elements)
+        return Subspace(prefix: prefix + tuple.pack())
     }
 
     // MARK: - Key Encoding/Decoding
 
-    /// Encode a tuple into a key with this subspace's prefix
-    /// - Parameter tuple: The tuple to encode
-    /// - Returns: The encoded key with prefix
+    /// Pack a tuple into a key with this subspace's prefix
+    /// - Parameter tuple: The tuple to pack
+    /// - Returns: The packed key with prefix
     ///
-    /// The returned key will have the format: `[prefix][encoded tuple]`
+    /// The returned key will have the format: `[prefix][packed tuple]`
     public func pack(_ tuple: Tuple) -> FDB.Bytes {
-        return prefix + tuple.encode()
+        return prefix + tuple.pack()
     }
 
-    /// Decode a key into a tuple, removing this subspace's prefix
-    /// - Parameter key: The key to decode
-    /// - Returns: The decoded tuple
+    /// Unpack a key into a tuple, removing this subspace's prefix
+    /// - Parameter key: The key to unpack
+    /// - Returns: The unpacked tuple
     /// - Throws: `TupleError.invalidDecoding` if the key doesn't start with this prefix
     ///
     /// This operation is the inverse of `pack(_:)`. It removes the subspace prefix
-    /// and decodes the remaining bytes as a tuple.
+    /// and unpacks the remaining bytes as a tuple.
     public func unpack(_ key: FDB.Bytes) throws -> Tuple {
         guard key.starts(with: prefix) else {
             throw TupleError.invalidDecoding("Key does not match subspace prefix")
         }
         let tupleBytes = Array(key.dropFirst(prefix.count))
-        let elements = try Tuple.decode(from: tupleBytes)
+        let elements = try Tuple.unpack(from: tupleBytes)
         return Tuple(elements)
     }
 
@@ -151,11 +165,11 @@ public struct Subspace: Sendable {
     /// ## Example
     ///
     /// ```swift
-    /// let userSpace = Subspace(rootPrefix: "users")
+    /// let userSpace = Subspace(prefix: Tuple("users").pack())
     /// let key = userSpace.pack(Tuple(12345))
     /// print(userSpace.contains(key))  // true
     ///
-    /// let otherKey = Subspace(rootPrefix: "posts").pack(Tuple(1))
+    /// let otherKey = Subspace(prefix: Tuple("posts").pack()).pack(Tuple(1))
     /// print(userSpace.contains(otherKey))  // false
     /// ```
     public func contains(_ key: FDB.Bytes) -> Bool {
@@ -224,7 +238,7 @@ public struct Subspace: Sendable {
     /// ## Example (Tuple-Encoded Data)
     ///
     /// ```swift
-    /// let userSpace = Subspace(rootPrefix: "users")
+    /// let userSpace = Subspace(prefix: Tuple("users").pack())
     /// let (begin, end) = userSpace.range()
     ///
     /// // Scan all user keys (safe - tuple-encoded)
@@ -255,7 +269,7 @@ public struct Subspace: Sendable {
     /// ## Example
     ///
     /// ```swift
-    /// let userSpace = Subspace(rootPrefix: "users")
+    /// let userSpace = Subspace(prefix: Tuple("users").pack())
     /// // Scan users with IDs from 1000 to 2000
     /// let (begin, end) = userSpace.range(from: Tuple(1000), to: Tuple(2000))
     /// ```
@@ -264,21 +278,11 @@ public struct Subspace: Sendable {
     }
 }
 
-// MARK: - Equatable
+// MARK: - Equatable & Hashable
+// Compiler-synthesized implementations
 
-extension Subspace: Equatable {
-    public static func == (lhs: Subspace, rhs: Subspace) -> Bool {
-        return lhs.prefix == rhs.prefix
-    }
-}
-
-// MARK: - Hashable
-
-extension Subspace: Hashable {
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(prefix)
-    }
-}
+extension Subspace: Equatable {}
+extension Subspace: Hashable {}
 
 // MARK: - CustomStringConvertible
 
@@ -292,62 +296,31 @@ extension Subspace: CustomStringConvertible {
 // MARK: - SubspaceError
 
 /// Errors that can occur in Subspace operations
-public enum SubspaceError: Error {
+public struct SubspaceError: Error {
+    /// Error code identifying the type of error
+    public let code: Code
+
+    /// Human-readable error message
+    public let message: String
+
+    /// Error codes for Subspace operations
+    public enum Code: Sendable {
+        /// The key cannot be incremented because it contains only 0xFF bytes
+        case cannotIncrementKey
+    }
+
+    /// Creates a new SubspaceError
+    /// - Parameters:
+    ///   - code: The error code
+    ///   - message: Human-readable error message
+    public init(code: Code, message: String) {
+        self.code = code
+        self.message = message
+    }
+
     /// The key cannot be incremented because it contains only 0xFF bytes
-    case cannotIncrementKey(String)
-}
-
-// MARK: - FDB.Bytes String Increment Extension
-
-extension FDB.Bytes {
-    /// String increment for raw binary prefixes
-    ///
-    /// Returns the first key that would sort outside the range prefixed by this byte array.
-    /// This implements the canonical strinc algorithm used in FoundationDB.
-    ///
-    /// The algorithm:
-    /// 1. Strip all trailing 0xFF bytes
-    /// 2. Increment the last remaining byte
-    /// 3. Return the truncated result
-    ///
-    /// This matches the behavior of:
-    /// - Go: `fdb.Strinc()`
-    /// - Java: `ByteArrayUtil.strinc()`
-    /// - Python: `fdb.strinc()`
-    ///
-    /// - Returns: Incremented byte array
-    /// - Throws: `SubspaceError.cannotIncrementKey` if the byte array is empty
-    ///   or contains only 0xFF bytes
-    ///
-    /// ## Example
-    ///
-    /// ```swift
-    /// try [0x01, 0x02].strinc()       // → [0x01, 0x03]
-    /// try [0x01, 0xFF].strinc()       // → [0x02]
-    /// try [0x01, 0x02, 0xFF, 0xFF].strinc()  // → [0x01, 0x03]
-    /// try [0xFF, 0xFF].strinc()       // throws SubspaceError.cannotIncrementKey
-    /// try [].strinc()                 // throws SubspaceError.cannotIncrementKey
-    /// ```
-    ///
-    /// - SeeAlso: `Subspace.prefixRange()` for usage with Subspace
-    public func strinc() throws -> FDB.Bytes {
-        // Strip trailing 0xFF bytes
-        var result = self
-        while result.last == 0xFF {
-            result.removeLast()
-        }
-
-        // Check if result is empty (input was empty or all 0xFF)
-        guard !result.isEmpty else {
-            throw SubspaceError.cannotIncrementKey(
-                "Key must contain at least one byte not equal to 0xFF"
-            )
-        }
-
-        // Increment the last byte
-        result[result.count - 1] = result[result.count - 1] &+ 1
-
-        return result
+    public static func cannotIncrementKey(_ message: String) -> SubspaceError {
+        return SubspaceError(code: .cannotIncrementKey, message: message)
     }
 }
 
@@ -417,8 +390,8 @@ extension Subspace {
     /// ```
     ///
     /// - SeeAlso: `range()` for tuple-encoded data ranges
-    /// - SeeAlso: `FDB.Bytes.strinc()` for the underlying algorithm
+    /// - SeeAlso: `FDB.strinc()` for the underlying algorithm
     public func prefixRange() throws -> (begin: FDB.Bytes, end: FDB.Bytes) {
-        return (prefix, try prefix.strinc())
+        return (prefix, try FDB.strinc(prefix))
     }
 }

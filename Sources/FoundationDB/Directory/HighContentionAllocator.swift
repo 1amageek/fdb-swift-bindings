@@ -49,6 +49,26 @@ public final class HighContentionAllocator: Sendable {
     /// Recent subspace for tracking recently allocated prefixes
     private let recent: Subspace
 
+    // MARK: - Window Size Constants
+
+    /// Window sizes for dynamic allocation
+    private enum WindowSize {
+        /// Small window for start values < 255
+        static let small: Int64 = 64
+
+        /// Medium window for start values < 65535
+        static let medium: Int64 = 1024
+
+        /// Large window for start values >= 65535
+        static let large: Int64 = 8192
+
+        /// Threshold for small window
+        static let smallThreshold: Int64 = 255
+
+        /// Threshold for medium window
+        static let mediumThreshold: Int64 = 65535
+    }
+
     // MARK: - Initialization
 
     /// Initialize High Contention Allocator
@@ -135,7 +155,7 @@ public final class HighContentionAllocator: Sendable {
                 try transaction.addWriteConflictKey(Array(candidateKey))
 
                 // Return packed candidate as prefix
-                let packedCandidate = Tuple(candidate).encode()
+                let packedCandidate = Tuple(candidate).pack()
                 return packedCandidate
             }
 
@@ -155,19 +175,19 @@ public final class HighContentionAllocator: Sendable {
     /// Calculate window size based on start value
     ///
     /// Dynamic window sizing balances key shortness vs. contention handling:
-    /// - Small values: smaller window (64) for shorter keys
-    /// - Medium values: medium window (1024)
-    /// - Large values: large window (8192) to handle high contention
+    /// - Small values: smaller window for shorter keys
+    /// - Medium values: medium window
+    /// - Large values: large window to handle high contention
     ///
     /// - Parameter start: Current window start value
     /// - Returns: Window size
     private func windowSize(start: Int64) -> Int64 {
-        if start < 255 {
-            return 64
-        } else if start < 65535 {
-            return 1024
+        if start < WindowSize.smallThreshold {
+            return WindowSize.small
+        } else if start < WindowSize.mediumThreshold {
+            return WindowSize.medium
         } else {
-            return 8192
+            return WindowSize.large
         }
     }
 
@@ -207,7 +227,10 @@ public final class HighContentionAllocator: Sendable {
     /// Encode Int64 as little-endian bytes
     private func littleEndianInt64(_ value: Int64) -> FDB.Bytes {
         var val = value.littleEndian
-        return withUnsafeBytes(of: &val) { Array($0) }
+        var bytes = FDB.Bytes()
+        bytes.reserveCapacity(8)
+        withUnsafeBytes(of: &val) { bytes.append(contentsOf: $0) }
+        return bytes
     }
 
     /// Decode Int64 from little-endian bytes

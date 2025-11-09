@@ -75,6 +75,16 @@ public enum DirectoryType: Sendable, Equatable, Hashable {
             self = .custom(string)
         }
     }
+
+    /// String representation of the directory type
+    public var description: String {
+        switch self {
+        case .partition:
+            return "partition"
+        case .custom(let name):
+            return name
+        }
+    }
 }
 
 /// FoundationDB Directory Layer implementation
@@ -1018,7 +1028,7 @@ public final class DirectoryLayer: Sendable {
 
         if let versionData = try await transaction.getValue(for: Array(versionKey), snapshot: false) {
             // Parse stored version
-            let tuple = try Tuple.decode(from: versionData)
+            let tuple = try Tuple.unpack(from: versionData)
             guard tuple.count == 3 else {
                 throw DirectoryError.invalidVersion(data: Data(versionData))
             }
@@ -1059,7 +1069,7 @@ public final class DirectoryLayer: Sendable {
             let version = DirectoryVersion.current
             let versionTuple = Tuple(version.major, version.minor, version.patch)
             transaction.setValue(
-                versionTuple.encode(),
+                versionTuple.pack(),
                 for: Array(versionKey)
             )
         }
@@ -1108,7 +1118,7 @@ public final class DirectoryLayer: Sendable {
         // Try to decode prefix as a tuple to get the candidate number
         // If it's not HCA-allocated, this will fail or return non-integer
         do {
-            let elements = try Tuple.decode(from: prefix)
+            let elements = try Tuple.unpack(from: prefix)
             // If prefix decodes to a single integer, it might be HCA-allocated
             if elements.count == 1, let candidate = elements[0] as? Int64 {
                 // Check if this candidate is in recent allocations

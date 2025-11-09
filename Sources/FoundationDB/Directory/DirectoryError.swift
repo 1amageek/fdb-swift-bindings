@@ -125,30 +125,8 @@ extension DirectoryError: CustomStringConvertible {
             return "Invalid path \(path.joined(separator: "/")): \(reason)"
 
         case .layerMismatch(let expected, let actual):
-            let expectedStr: String
-            if let exp = expected {
-                switch exp {
-                case .partition:
-                    expectedStr = "partition"
-                case .custom(let name):
-                    expectedStr = name
-                }
-            } else {
-                expectedStr = "nil"
-            }
-
-            let actualStr: String
-            if let act = actual {
-                switch act {
-                case .partition:
-                    actualStr = "partition"
-                case .custom(let name):
-                    actualStr = name
-                }
-            } else {
-                actualStr = "nil"
-            }
-
+            let expectedStr = expected?.description ?? "nil"
+            let actualStr = actual?.description ?? "nil"
             return "Layer mismatch: expected \(expectedStr), got \(actualStr)"
 
         case .cannotCreatePartitionInPartition(let path):

@@ -34,7 +34,7 @@ struct DirectoryLayerTests {
         // Clean up ALL test data ONLY in the test subspace
         // IMPORTANT: Never clear the entire keyspace [0x00, 0xFF]
         // as it would destroy all data in the cluster
-        let testSubspace = Subspace(rootPrefix: "directory-layer-tests")
+        let testSubspace = Subspace(prefix: Tuple("directory-layer-tests").pack())
 
         // Clear the entire test subspace before running any tests
         let (begin, end) = testSubspace.range()
@@ -48,7 +48,7 @@ struct DirectoryLayerTests {
 
     // Helper to create a unique DirectoryLayer for each test
     private func makeDirectoryLayer(name: String) -> DirectoryLayer {
-        let testSubspace = Subspace(rootPrefix: "directory-layer-tests").subspace(name)
+        let testSubspace = Subspace(prefix: Tuple("directory-layer-tests").pack()).subspace(name)
         return DirectoryLayer(
             database: database,
             nodeSubspace: testSubspace.subspace(0xFE),  // Test metadata
@@ -204,7 +204,7 @@ struct DirectoryLayerTests {
         )
 
         // dir.prefix should be ABSOLUTE (contentSubspace.prefix + relativePrefix)
-        let testSubspace = Subspace(rootPrefix: "directory-layer-tests").subspace("manualPrefixCollisionDetection")
+        let testSubspace = Subspace(prefix: Tuple("directory-layer-tests").pack()).subspace("manualPrefixCollisionDetection")
         let expectedAbsolutePrefix = testSubspace.prefix + relativePrefix
         #expect(first.prefix == expectedAbsolutePrefix)
 
@@ -241,7 +241,7 @@ struct DirectoryLayerTests {
         // subspace(0xFE) adds Tuple(0xFE).encode(), not just [0xFE]
         // We need to find what Tuple(0xFE) actually encodes to
 
-        let testSubspace = Subspace(rootPrefix: "directory-layer-tests").subspace("manualPrefixInMetadataSpace")
+        let testSubspace = Subspace(prefix: Tuple("directory-layer-tests").pack()).subspace("manualPrefixInMetadataSpace")
         let nodeSubspace = testSubspace.subspace(0xFE)
 
         // Extract the Tuple-encoded suffix
@@ -409,7 +409,7 @@ struct DirectoryLayerTests {
         try await database.withTransaction { transaction in
             // nodeSubspace[parentPrefix][subdirs=0][childName] → childPrefix (RELATIVE)
             // Use the actual nodeSubspace for this test
-            let testSubspace = Subspace(rootPrefix: "directory-layer-tests").subspace("crossLanguageMetadataStructure")
+            let testSubspace = Subspace(prefix: Tuple("directory-layer-tests").pack()).subspace("crossLanguageMetadataStructure")
             let nodeSubspace = testSubspace.subspace(0xFE)
 
             let subdirKey = nodeSubspace
@@ -577,7 +577,7 @@ struct DirectoryLayerTests {
 
         // BUG CHECK 6: Verify data didn't leak into metadata space
         try await database.withTransaction { transaction in
-            let testSubspace = Subspace(rootPrefix: "directory-layer-tests").subspace("bugRootDirectoryPrefix")
+            let testSubspace = Subspace(prefix: Tuple("directory-layer-tests").pack()).subspace("bugRootDirectoryPrefix")
             let nodeSubspace = testSubspace.subspace(0xFE)
 
             // Check if data corrupted the metadata subspace

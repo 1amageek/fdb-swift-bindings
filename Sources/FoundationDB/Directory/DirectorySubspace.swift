@@ -43,7 +43,7 @@ import Foundation
 ///
 /// **Note**: Directory operations (createOrOpen, list, remove, etc.) should be
 /// performed through DirectoryLayer, not DirectorySubspace.
-public struct DirectorySubspace: Sendable {
+public struct DirectorySubspace: Sendable, Equatable, Hashable {
 
     // MARK: - Properties
 
@@ -143,25 +143,8 @@ public struct DirectorySubspace: Sendable {
     }
 }
 
-// MARK: - Equatable
-
-extension DirectorySubspace: Equatable {
-    public static func == (lhs: DirectorySubspace, rhs: DirectorySubspace) -> Bool {
-        lhs.prefix == rhs.prefix &&
-        lhs.path == rhs.path &&
-        lhs.type == rhs.type
-    }
-}
-
-// MARK: - Hashable
-
-extension DirectorySubspace: Hashable {
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(`prefix`)
-        hasher.combine(path)
-        hasher.combine(type)
-    }
-}
+// MARK: - Equatable & Hashable
+// Compiler-synthesized implementations
 
 // MARK: - CustomStringConvertible
 
@@ -169,14 +152,7 @@ extension DirectorySubspace: CustomStringConvertible {
     public var description: String {
         let pathStr = path.joined(separator: "/")
         if let type = type {
-            let layerStr: String
-            switch type {
-            case .partition:
-                layerStr = "partition"
-            case .custom(let name):
-                layerStr = name
-            }
-            return "DirectorySubspace(path: \"\(pathStr)\", layer: \"\(layerStr)\")"
+            return "DirectorySubspace(path: \"\(pathStr)\", layer: \"\(type.description)\")"
         } else {
             return "DirectorySubspace(path: \"\(pathStr)\")"
         }
@@ -190,14 +166,7 @@ extension DirectorySubspace: CustomDebugStringConvertible {
         let pathStr = path.joined(separator: "/")
         let prefixHex = subspace.prefix.map { String(format: "%02x", $0) }.joined()
         if let type = type {
-            let layerStr: String
-            switch type {
-            case .partition:
-                layerStr = "partition"
-            case .custom(let name):
-                layerStr = name
-            }
-            return "DirectorySubspace(path: \"\(pathStr)\", prefix: 0x\(prefixHex), layer: \"\(layerStr)\")"
+            return "DirectorySubspace(path: \"\(pathStr)\", prefix: 0x\(prefixHex), layer: \"\(type.description)\")"
         } else {
             return "DirectorySubspace(path: \"\(pathStr)\", prefix: 0x\(prefixHex))"
         }

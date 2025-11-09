@@ -25,13 +25,13 @@ import Testing
 struct SubspaceTests {
     @Test("Subspace creation creates non-empty prefix")
     func subspaceCreation() {
-        let subspace = Subspace(rootPrefix: "test")
+        let subspace = Subspace(prefix: Tuple("test").pack())
         #expect(!subspace.prefix.isEmpty)
     }
 
     @Test("Nested subspace prefix includes root prefix")
     func nestedSubspace() {
-        let root = Subspace(rootPrefix: "test")
+        let root = Subspace(prefix: Tuple("test").pack())
         let nested = root.subspace(Int64(1), "child")
 
         #expect(nested.prefix.starts(with: root.prefix))
@@ -40,7 +40,7 @@ struct SubspaceTests {
 
     @Test("Pack/unpack preserves subspace prefix")
     func packUnpack() throws {
-        let subspace = Subspace(rootPrefix: "test")
+        let subspace = Subspace(prefix: Tuple("test").pack())
         let tuple = Tuple("key", Int64(123))
 
         let packed = subspace.pack(tuple)
@@ -52,7 +52,7 @@ struct SubspaceTests {
 
     @Test("Range returns correct begin and end keys")
     func range() {
-        let subspace = Subspace(rootPrefix: "test")
+        let subspace = Subspace(prefix: Tuple("test").pack())
         let (begin, end) = subspace.range()
 
         // Begin should be prefix + 0x00
@@ -119,7 +119,7 @@ struct SubspaceTests {
 
     @Test("Range handles special characters")
     func rangeSpecialCharacters() {
-        let subspace = Subspace(rootPrefix: "test_special_chars")
+        let subspace = Subspace(prefix: Tuple("test_special_chars").pack())
         let (begin, end) = subspace.range()
 
         // begin should be prefix + [0x00]
@@ -133,11 +133,11 @@ struct SubspaceTests {
     @Test("Range handles empty string root prefix")
     func rangeEmptyStringPrefix() {
         // Empty string encodes to [0x02, 0x00] in tuple encoding
-        let subspace = Subspace(rootPrefix: "")
+        let subspace = Subspace(prefix: Tuple("").pack())
         let (begin, end) = subspace.range()
 
         // Prefix should be tuple-encoded empty string
-        let encodedEmpty = Tuple("").encode()
+        let encodedEmpty = Tuple("").pack()
         #expect(begin == encodedEmpty + [0x00])
         #expect(end == encodedEmpty + [0xFF])
     }
@@ -155,13 +155,13 @@ struct SubspaceTests {
 
     @Test("Contains checks if key belongs to subspace")
     func contains() {
-        let subspace = Subspace(rootPrefix: "test")
+        let subspace = Subspace(prefix: Tuple("test").pack())
         let tuple = Tuple("key")
         let key = subspace.pack(tuple)
 
         #expect(subspace.contains(key))
 
-        let otherSubspace = Subspace(rootPrefix: "other")
+        let otherSubspace = Subspace(prefix: Tuple("other").pack())
         #expect(!otherSubspace.contains(key))
     }
 
@@ -213,11 +213,7 @@ struct SubspaceTests {
             _ = try subspace.prefixRange()
             Issue.record("Should throw error for all-0xFF prefix")
         } catch let error as SubspaceError {
-            if case .cannotIncrementKey = error {
-                // Expected
-            } else {
-                Issue.record("Wrong error case")
-            }
+            #expect(error.code == .cannotIncrementKey)
         } catch {
             Issue.record("Wrong error type: \(error)")
         }
@@ -231,11 +227,7 @@ struct SubspaceTests {
             _ = try subspace.prefixRange()
             Issue.record("Should throw error for empty prefix")
         } catch let error as SubspaceError {
-            if case .cannotIncrementKey = error {
-                // Expected
-            } else {
-                Issue.record("Wrong error case")
-            }
+            #expect(error.code == .cannotIncrementKey)
         } catch {
             Issue.record("Wrong error type: \(error)")
         }
@@ -299,7 +291,7 @@ struct SubspaceTests {
     @Test("prefixRange for tuple-encoded data")
     func prefixRangeTupleEncoded() throws {
         // Tuple-encoded prefix (no trailing 0xFF possible)
-        let subspace = Subspace(rootPrefix: "users")
+        let subspace = Subspace(prefix: Tuple("users").pack())
         let (begin, end) = try subspace.prefixRange()
 
         // Begin is the tuple-encoded prefix

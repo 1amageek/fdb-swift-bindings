@@ -376,6 +376,23 @@ public final class DirectoryLayer: Sendable {
         }
     }
 
+    /// Move a directory from one location to another (convenience overload).
+    ///
+    /// This is a convenience method with more fluent argument labels.
+    /// It delegates to move(oldPath:newPath:).
+    ///
+    /// - Parameters:
+    ///   - from: Source directory path
+    ///   - to: Destination directory path
+    /// - Returns: DirectorySubspace at the new location
+    /// - Throws: DirectoryError if source doesn't exist or destination exists
+    public func move(
+        from oldPath: [String],
+        to newPath: [String]
+    ) async throws -> DirectorySubspace {
+        try await move(oldPath: oldPath, newPath: newPath)
+    }
+
     /// Remove a directory and all its contents
     ///
     /// - Parameter path: Directory path to remove
@@ -437,7 +454,7 @@ public final class DirectoryLayer: Sendable {
         }
 
         // Remove recursively
-        try await removeRecursiveNode(transaction: transaction, dir: node)
+        try await removeRecursive(transaction: transaction, dir: node)
 
         // Remove parent's reference
         if !node.path.isEmpty {
@@ -943,7 +960,7 @@ public final class DirectoryLayer: Sendable {
     /// - Parameters:
     ///   - transaction: Transaction to use
     ///   - directory: Directory to remove recursively
-    private func removeRecursiveNode(
+    private func removeRecursive(
         transaction: any TransactionProtocol,
         dir directory: DirectorySubspace
     ) async throws {
@@ -961,7 +978,7 @@ public final class DirectoryLayer: Sendable {
             ) else {
                 continue
             }
-            try await self.removeRecursiveNode(
+            try await self.removeRecursive(
                 transaction: transaction,
                 dir: childDirectory
             )
@@ -982,21 +999,6 @@ public final class DirectoryLayer: Sendable {
             beginKey: Array(contentRange.begin),
             endKey: Array(contentRange.end)
         )
-    }
-
-    /// Remove node and all its descendants recursively (legacy)
-    @available(*, deprecated, message: "Use removeRecursiveNode instead")
-    private func removeRecursive(
-        transaction: any TransactionProtocol,
-        node: Node
-    ) async throws {
-        // Convert to DirectorySubspace and use new method
-        let dir = DirectorySubspace(
-            prefix: node.prefix,
-            path: node.path,
-            type: node.type
-        )
-        try await removeRecursiveNode(transaction: transaction, dir: dir)
     }
 
     /// Create partition layer from node
@@ -1278,13 +1280,28 @@ public final class DirectoryLayer: Sendable {
 extension DatabaseProtocol {
     /// Default Directory Layer instance
     ///
-    /// **Note**: This creates a new instance on every access.
+    /// Creates a new Directory Layer instance.
+    ///
+    /// **Note**: This creates a new instance on every call.
     /// For better performance, create once and reuse:
     ///
     /// ```swift
-    /// let directoryLayer = DirectoryLayer(database: database)
+    /// let directoryLayer = database.makeDirectoryLayer()
+    /// // Reuse directoryLayer for multiple operations
     /// ```
-    public var directory: DirectoryLayer {
-        DirectoryLayer(database: self)
+    ///
+    /// - Parameters:
+    ///   - nodeSubspace: Custom node subspace (defaults to system subspace)
+    ///   - contentSubspace: Custom content subspace (defaults to root)
+    /// - Returns: New DirectoryLayer instance
+    public func makeDirectoryLayer(
+        nodeSubspace: Subspace? = nil,
+        contentSubspace: Subspace? = nil
+    ) -> DirectoryLayer {
+        DirectoryLayer(
+            database: self,
+            nodeSubspace: nodeSubspace,
+            contentSubspace: contentSubspace
+        )
     }
 }

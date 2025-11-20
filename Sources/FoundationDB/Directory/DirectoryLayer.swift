@@ -142,23 +142,61 @@ public final class DirectoryLayer: Sendable {
 
     // MARK: - Initialization
 
-    /// Initialize Directory Layer
+    /// Initialize Directory Layer with optional custom subspaces
+    ///
+    /// Creates a new Directory Layer instance for managing hierarchical directory structure.
+    /// By default, uses FoundationDB's standard node subspace (prefix 0xFE) for metadata
+    /// and an empty prefix for content allocation.
     ///
     /// - Parameters:
     ///   - database: Database instance
     ///   - nodeSubspace: Node subspace for metadata (default: prefix 0xFE)
     ///   - contentSubspace: Content subspace for data (default: empty prefix)
-    ///   - rootLayer: Root directory layer (nil if this IS the root, used internally for partitions)
-    public init(
+    ///
+    /// **Example**:
+    /// ```swift
+    /// // Standard Directory Layer
+    /// let dir = DirectoryLayer(database: database)
+    ///
+    /// // Custom subspaces
+    /// let customDir = DirectoryLayer(
+    ///     database: database,
+    ///     nodeSubspace: Subspace(prefix: [0x01, 0xFE]),
+    ///     contentSubspace: Subspace(prefix: [0x01])
+    /// )
+    /// ```
+    public convenience init(
         database: any DatabaseProtocol,
-        nodeSubspace: Subspace? = nil,
-        contentSubspace: Subspace? = nil,
-        rootLayer: DirectoryLayer? = nil
+        nodeSubspace: Subspace = Subspace(prefix: [0xFE]),
+        contentSubspace: Subspace = Subspace(prefix: [])
+    ) {
+        self.init(
+            database: database,
+            nodeSubspace: nodeSubspace,
+            contentSubspace: contentSubspace,
+            rootLayer: nil
+        )
+    }
+
+    /// Internal designated initializer
+    ///
+    /// Used internally for creating partition layers with proper parent hierarchy.
+    ///
+    /// - Parameters:
+    ///   - database: Database instance
+    ///   - nodeSubspace: Node subspace for metadata
+    ///   - contentSubspace: Content subspace for data
+    ///   - rootLayer: Root directory layer (for partition hierarchy)
+    private init(
+        database: any DatabaseProtocol,
+        nodeSubspace: Subspace,
+        contentSubspace: Subspace,
+        rootLayer: DirectoryLayer?
     ) {
         self.database = database
-        self.nodeSubspace = nodeSubspace ?? Subspace(prefix: [0xFE])
-        self.contentSubspace = contentSubspace ?? Subspace(prefix: [])
-        self.rootNode = self.nodeSubspace
+        self.nodeSubspace = nodeSubspace
+        self.contentSubspace = contentSubspace
+        self.rootNode = nodeSubspace
         self.rootLayer = rootLayer
 
         // Initialize HCA with nodeSubspace["hca"]
@@ -1278,9 +1316,11 @@ public final class DirectoryLayer: Sendable {
 // MARK: - Database Extension
 
 extension DatabaseProtocol {
-    /// Default Directory Layer instance
+    /// Create a Directory Layer instance
     ///
-    /// Creates a new Directory Layer instance.
+    /// Creates a new Directory Layer instance for managing hierarchical directory structure.
+    /// By default, uses FoundationDB's standard configuration (node subspace prefix 0xFE,
+    /// empty content subspace prefix).
     ///
     /// **Note**: This creates a new instance on every call.
     /// For better performance, create once and reuse:
@@ -1291,12 +1331,12 @@ extension DatabaseProtocol {
     /// ```
     ///
     /// - Parameters:
-    ///   - nodeSubspace: Custom node subspace (defaults to system subspace)
-    ///   - contentSubspace: Custom content subspace (defaults to root)
+    ///   - nodeSubspace: Node subspace for metadata (default: prefix 0xFE)
+    ///   - contentSubspace: Content subspace for data (default: empty prefix)
     /// - Returns: New DirectoryLayer instance
     public func makeDirectoryLayer(
-        nodeSubspace: Subspace? = nil,
-        contentSubspace: Subspace? = nil
+        nodeSubspace: Subspace = Subspace(prefix: [0xFE]),
+        contentSubspace: Subspace = Subspace(prefix: [])
     ) -> DirectoryLayer {
         DirectoryLayer(
             database: self,

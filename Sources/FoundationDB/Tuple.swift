@@ -89,6 +89,11 @@ public struct Tuple: Sendable, Hashable, Equatable {
         return elements.count
     }
 
+    /// Check if the tuple has no elements
+    public var isEmpty: Bool {
+        return elements.isEmpty
+    }
+
     /// Pack tuple elements into a byte array
     ///
     /// Encodes all tuple elements into a single byte array using the FoundationDB
@@ -398,6 +403,31 @@ extension UUID: TupleElement {
         )
 
         return UUID(uuid: uuidTuple)
+    }
+}
+
+extension Date: TupleElement {
+    /// Encode Date as Double (timeIntervalSince1970) using Double encoding.
+    ///
+    /// Lexicographic byte ordering matches chronological ordering.
+    /// Microsecond precision is maintained for typical dates (1970-2100).
+    /// Sub-microsecond precision is not guaranteed.
+    ///
+    /// - Returns: Encoded bytes with Double tuple encoding
+    public func encodeTuple() -> FDB.Bytes {
+        return timeIntervalSince1970.encodeTuple()
+    }
+
+    /// Decode Date from Double (timeIntervalSince1970).
+    ///
+    /// - Parameters:
+    ///   - bytes: The encoded bytes
+    ///   - offset: Current offset in bytes (updated after decoding)
+    /// - Returns: Decoded Date
+    /// - Throws: TupleError.invalidDecoding if bytes are insufficient or malformed
+    public static func decodeTuple(from bytes: FDB.Bytes, at offset: inout Int) throws -> Date {
+        let timeInterval = try Double.decodeTuple(from: bytes, at: &offset)
+        return Date(timeIntervalSince1970: timeInterval)
     }
 }
 

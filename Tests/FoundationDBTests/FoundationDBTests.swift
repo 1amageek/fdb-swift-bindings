@@ -486,8 +486,8 @@ func readVersionSnapshot() async throws {
     newTransaction.setReadVersion(testVersion)
 
     // Test snapshot read with the version
-    newTransaction.setValue("test_snapshot_value", for: "test_snapshot_key")
-    let value = try await newTransaction.getValue(for: "test_snapshot_key", snapshot: true)
+    newTransaction.setValue("rangetest_snapshot_value", for: "rangetest_snapshot_key")
+    let value = try await newTransaction.getValue(for: "rangetest_snapshot_key", snapshot: true)
     #expect(value != nil, "Snapshot read should work with set read version")
 }
 
@@ -1701,4 +1701,621 @@ func conflictRangeTypeValues() {
     // Test that conflict range type enum has expected values
     #expect(FDB.ConflictRangeType.read.rawValue == 0, "read should have value 0")
     #expect(FDB.ConflictRangeType.write.rawValue == 1, "write should have value 1")
+}
+
+// MARK: - Reverse Range Query Tests
+
+@Test("getRangeNative with reverse returns keys in descending order")
+func getRangeNativeReverse() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_reverse_", endKey: "rangetest_reverse`")
+        for i in 1...5 {
+            let key = "rangetest_reverse_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test reverse range query
+    let transaction = try database.createTransaction()
+    let beginSelector = FDB.KeySelector.firstGreaterOrEqual("rangetest_reverse_")
+    let endSelector = FDB.KeySelector.firstGreaterOrEqual("rangetest_reverse`")
+
+    let result = try await transaction.getRangeNative(
+        beginSelector: beginSelector,
+        endSelector: endSelector,
+        limit: 0,
+        targetBytes: 0,
+        streamingMode: .iterator,
+        iteration: 1,
+        reverse: true,
+        snapshot: false
+    )
+
+    #expect(result.records.count == 5, "Should return all 5 records")
+
+    // Verify descending order
+    let keys = result.records.map { String(bytes: $0.0) }
+    #expect(keys[0] == "rangetest_reverse_005", "First key should be the largest")
+    #expect(keys[1] == "rangetest_reverse_004", "Second key should be second largest")
+    #expect(keys[4] == "rangetest_reverse_001", "Last key should be the smallest")
+}
+
+@Test("getRangeNative reverse with limit")
+func getRangeNativeReverseWithLimit() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_rev_limit_", endKey: "rangetest_rev_limit`")
+        for i in 1...10 {
+            let key = "rangetest_rev_limit_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test reverse range query with limit
+    let transaction = try database.createTransaction()
+    let result = try await transaction.getRangeNative(
+        beginSelector: .firstGreaterOrEqual("rangetest_rev_limit_"),
+        endSelector: .firstGreaterOrEqual("rangetest_rev_limit`"),
+        limit: 3,
+        targetBytes: 0,
+        streamingMode: .iterator,
+        iteration: 1,
+        reverse: true,
+        snapshot: false
+    )
+
+    #expect(result.records.count == 3, "Should return exactly 3 records due to limit")
+
+    // Verify we got the last 3 keys in descending order
+    let keys = result.records.map { String(bytes: $0.0) }
+    #expect(keys[0] == "rangetest_rev_limit_010", "First should be key 010")
+    #expect(keys[1] == "rangetest_rev_limit_009", "Second should be key 009")
+    #expect(keys[2] == "rangetest_rev_limit_008", "Third should be key 008")
+}
+
+@Test("getRange AsyncSequence with reverse")
+func getAsyncRangeReverse() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_async_rev_", endKey: "rangetest_async_rev`")
+        for i in 1...5 {
+            let key = "rangetest_async_rev_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test using new getRange API with reverse
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_async_rev_"),
+        to: .firstGreaterOrEqual("rangetest_async_rev`"),
+        reverse: true
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 5, "Should return all 5 records")
+    #expect(keys[0] == "rangetest_async_rev_005", "First key should be the largest")
+    #expect(keys[4] == "rangetest_async_rev_001", "Last key should be the smallest")
+}
+
+@Test("getRange AsyncSequence reverse with limit")
+func getAsyncRangeReverseWithLimit() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_asyncrevlim_", endKey: "rangetest_asyncrevlim`")
+        for i in 1...20 {
+            let key = "rangetest_asyncrevlim_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test reverse with limit using AsyncSequence
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_asyncrevlim_"),
+        to: .firstGreaterOrEqual("rangetest_asyncrevlim`"),
+        limit: 5,
+        reverse: true
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 5, "Should return exactly 5 records due to limit")
+    #expect(keys[0] == "rangetest_asyncrevlim_020", "First should be key 020")
+    #expect(keys[4] == "rangetest_asyncrevlim_016", "Last should be key 016")
+}
+
+@Test("getRange with streamingMode wantAll")
+func getAsyncRangeWithStreamingModeWantAll() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_streaming_", endKey: "rangetest_streaming`")
+        for i in 1...10 {
+            let key = "rangetest_streaming_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test with wantAll streaming mode
+    let transaction = try database.createTransaction()
+    var count = 0
+
+    for try await _ in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_streaming_"),
+        to: .firstGreaterOrEqual("rangetest_streaming`"),
+        streamingMode: .wantAll
+    ) {
+        count += 1
+    }
+
+    #expect(count == 10, "Should return all 10 records with wantAll mode")
+}
+
+@Test("getRange reverse iteration continues correctly across batches")
+func getAsyncRangeReverseContinuation() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data - enough to span multiple batches
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_rev_batch_", endKey: "rangetest_rev_batch`")
+        for i in 1...100 {
+            let key = "rangetest_rev_batch_\(String.padded(i))"
+            // Larger values to ensure multiple batches
+            let value = String(repeating: "x", count: 500)
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test reverse iteration across batches
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_rev_batch_"),
+        to: .firstGreaterOrEqual("rangetest_rev_batch`"),
+        reverse: true,
+        streamingMode: .small  // Use small batches to ensure multiple fetches
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 100, "Should return all 100 records")
+
+    // Verify order is strictly descending
+    for i in 0..<(keys.count - 1) {
+        #expect(keys[i] > keys[i + 1], "Keys should be in strictly descending order")
+    }
+
+    #expect(keys.first == "rangetest_rev_batch_100", "First key should be 100")
+    #expect(keys.last == "rangetest_rev_batch_001", "Last key should be 001")
+}
+
+// MARK: - Forward Limit Tests
+
+@Test("getRange AsyncSequence forward with limit")
+func getAsyncRangeForwardWithLimit() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_fwd_limit_", endKey: "rangetest_fwd_limit`")
+        for i in 1...20 {
+            let key = "rangetest_fwd_limit_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test forward with limit using AsyncSequence
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_fwd_limit_"),
+        to: .firstGreaterOrEqual("rangetest_fwd_limit`"),
+        limit: 5
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 5, "Should return exactly 5 records due to limit")
+    #expect(keys[0] == "rangetest_fwd_limit_001", "First should be key 001")
+    #expect(keys[4] == "rangetest_fwd_limit_005", "Last should be key 005")
+}
+
+@Test("getRange forward iteration continues correctly across batches with limit")
+func getAsyncRangeForwardContinuationWithLimit() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data - enough to span multiple batches
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_fwd_batch_", endKey: "rangetest_fwd_batch`")
+        for i in 1...100 {
+            let key = "rangetest_fwd_batch_\(String.padded(i))"
+            let value = String(repeating: "x", count: 500)
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test forward iteration with limit across batches
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_fwd_batch_"),
+        to: .firstGreaterOrEqual("rangetest_fwd_batch`"),
+        limit: 50,
+        streamingMode: .small
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 50, "Should return exactly 50 records due to limit")
+
+    // Verify order is strictly ascending
+    for i in 0..<(keys.count - 1) {
+        #expect(keys[i] < keys[i + 1], "Keys should be in strictly ascending order")
+    }
+
+    #expect(keys.first == "rangetest_fwd_batch_001", "First key should be 001")
+    #expect(keys.last == "rangetest_fwd_batch_050", "Last key should be 050")
+}
+
+// MARK: - Backward Compatibility Tests
+
+@Test("Legacy getRange(beginSelector:endSelector:) still works")
+func legacyGetRangeWithSelectors() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_legacy_sel_", endKey: "rangetest_legacy_sel`")
+        for i in 1...5 {
+            let key = "rangetest_legacy_sel_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Use legacy API
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        beginSelector: .firstGreaterOrEqual("rangetest_legacy_sel_"),
+        endSelector: .firstGreaterOrEqual("rangetest_legacy_sel`")
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 5, "Should return all 5 records")
+    #expect(keys[0] == "rangetest_legacy_sel_001", "First should be key 001")
+    #expect(keys[4] == "rangetest_legacy_sel_005", "Last should be key 005")
+}
+
+@Test("Legacy getRange(begin:end:) with Selectable still works")
+func legacyGetRangeWithSelectable() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_legacy_str_", endKey: "rangetest_legacy_str`")
+        for i in 1...3 {
+            let key = "rangetest_legacy_str_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Use legacy API with Selectable (String)
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        begin: "rangetest_legacy_str_",
+        end: "rangetest_legacy_str`"
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 3, "Should return all 3 records")
+}
+
+@Test("Legacy getRangeNative with default parameters still works")
+func legacyGetRangeNativeDefaults() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_legacy_native_", endKey: "rangetest_legacy_native`")
+        for i in 1...3 {
+            let key = "rangetest_legacy_native_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Use legacy getRangeNative API with defaults
+    let transaction = try database.createTransaction()
+    let result = try await transaction.getRangeNative(
+        beginSelector: .firstGreaterOrEqual("rangetest_legacy_native_"),
+        endSelector: .firstGreaterOrEqual("rangetest_legacy_native`")
+    )
+
+    #expect(result.records.count == 3, "Should return all 3 records")
+}
+
+// MARK: - Bytes-based API Tests
+
+@Test("getRange with Bytes keys")
+func getRangeWithBytesKeys() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    let prefix: FDB.Bytes = Array("rangetest_bytes_range_".utf8)
+    let endPrefix: FDB.Bytes = Array("rangetest_bytes_range`".utf8)
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: prefix, endKey: endPrefix)
+        for i in 1...5 {
+            let key = Array("rangetest_bytes_range_\(String.padded(i))".utf8)
+            let value = Array("value\(i)".utf8)
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test using new getRange API with Bytes
+    let transaction = try database.createTransaction()
+    var count = 0
+
+    for try await (key, _) in transaction.getRange(
+        from: prefix,
+        to: endPrefix,
+        limit: 3
+    ) {
+        count += 1
+        if count == 1 {
+            let keyStr = String(bytes: key)
+            #expect(keyStr == "rangetest_bytes_range_001", "First key should be 001")
+        }
+    }
+
+    #expect(count == 3, "Should return exactly 3 records due to limit")
+}
+
+@Test("getRange with Bytes keys and reverse")
+func getRangeWithBytesKeysReverse() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    let prefix: FDB.Bytes = Array("rangetest_bytes_rev_".utf8)
+    let endPrefix: FDB.Bytes = Array("rangetest_bytes_rev`".utf8)
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: prefix, endKey: endPrefix)
+        for i in 1...5 {
+            let key = Array("rangetest_bytes_rev_\(String.padded(i))".utf8)
+            let value = Array("value\(i)".utf8)
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test using getRange API with Bytes in reverse
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        from: prefix,
+        to: endPrefix,
+        reverse: true
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 5, "Should return all 5 records")
+    #expect(keys[0] == "rangetest_bytes_rev_005", "First should be largest key")
+    #expect(keys[4] == "rangetest_bytes_rev_001", "Last should be smallest key")
+}
+
+@Test("getRangeNative with Bytes keys and all parameters")
+func getRangeNativeWithBytesAllParams() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    let prefix: FDB.Bytes = Array("rangetest_native_bytes_".utf8)
+    let endPrefix: FDB.Bytes = Array("rangetest_native_bytes`".utf8)
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: prefix, endKey: endPrefix)
+        for i in 1...10 {
+            let key = Array("rangetest_native_bytes_\(String.padded(i))".utf8)
+            let value = Array("value\(i)".utf8)
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test getRangeNative with Bytes keys
+    let transaction = try database.createTransaction()
+    let result = try await transaction.getRangeNative(
+        beginKey: prefix,
+        endKey: endPrefix,
+        limit: 5,
+        targetBytes: 0,
+        streamingMode: .wantAll,
+        iteration: 1,
+        reverse: true,
+        snapshot: false
+    )
+
+    #expect(result.records.count == 5, "Should return 5 records due to limit")
+    let firstKey = String(bytes: result.records[0].0)
+    #expect(firstKey == "rangetest_native_bytes_010", "First key should be largest")
+}
+
+// MARK: - Empty Range Tests
+
+@Test("getRange on empty range returns no results")
+func getRangeEmptyRange() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear the range to ensure it's empty
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_empty_range_", endKey: "rangetest_empty_range`")
+        return ()
+    }
+
+    // Test getRange on empty range
+    let transaction = try database.createTransaction()
+    var count = 0
+
+    for try await _ in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_empty_range_"),
+        to: .firstGreaterOrEqual("rangetest_empty_range`")
+    ) {
+        count += 1
+    }
+
+    #expect(count == 0, "Empty range should return no results")
+}
+
+@Test("getRange reverse on empty range returns no results")
+func getRangeEmptyRangeReverse() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear the range to ensure it's empty
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_empty_rev_", endKey: "rangetest_empty_rev`")
+        return ()
+    }
+
+    // Test getRange reverse on empty range
+    let transaction = try database.createTransaction()
+    var count = 0
+
+    for try await _ in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_empty_rev_"),
+        to: .firstGreaterOrEqual("rangetest_empty_rev`"),
+        reverse: true
+    ) {
+        count += 1
+    }
+
+    #expect(count == 0, "Empty range with reverse should return no results")
+}
+
+// MARK: - Snapshot Mode Tests
+
+@Test("getRange with snapshot mode")
+func getRangeWithSnapshotMode() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_snapshot_", endKey: "rangetest_snapshot`")
+        for i in 1...5 {
+            let key = "rangetest_snapshot_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test getRange with snapshot mode
+    let transaction = try database.createTransaction()
+    var count = 0
+
+    for try await _ in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_snapshot_"),
+        to: .firstGreaterOrEqual("rangetest_snapshot`"),
+        snapshot: true
+    ) {
+        count += 1
+    }
+
+    #expect(count == 5, "Snapshot mode should return all 5 records")
+}
+
+@Test("getRange reverse with snapshot mode")
+func getRangeReverseWithSnapshotMode() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Clear and set up test data
+    try await database.withTransaction { transaction in
+        transaction.clearRange(beginKey: "rangetest_snap_rev_", endKey: "rangetest_snap_rev`")
+        for i in 1...5 {
+            let key = "rangetest_snap_rev_\(String.padded(i))"
+            let value = "value\(i)"
+            transaction.setValue(value, for: key)
+        }
+        return ()
+    }
+
+    // Test getRange reverse with snapshot mode
+    let transaction = try database.createTransaction()
+    var keys: [String] = []
+
+    for try await (key, _) in transaction.getRange(
+        from: .firstGreaterOrEqual("rangetest_snap_rev_"),
+        to: .firstGreaterOrEqual("rangetest_snap_rev`"),
+        reverse: true,
+        snapshot: true
+    ) {
+        keys.append(String(bytes: key))
+    }
+
+    #expect(keys.count == 5, "Should return all 5 records")
+    #expect(keys[0] == "rangetest_snap_rev_005", "First should be largest key with snapshot+reverse")
 }

@@ -33,15 +33,22 @@ extension FDB {
     /// ## Usage
     ///
     /// ```swift
-    /// let sequence = transaction.getRange(
-    ///     beginSelector: .firstGreaterOrEqual("user:"),
-    ///     endSelector: .firstGreaterOrEqual("user;")
-    /// )
+    /// // Basic forward scan
+    /// for try await (key, value) in transaction.getRange(
+    ///     from: .firstGreaterOrEqual("user:"),
+    ///     to: .firstGreaterOrEqual("user;")
+    /// ) {
+    ///     print(key, value)
+    /// }
     ///
-    /// for try await (key, value) in sequence {
-    ///     let userId = String(bytes: key)
-    ///     let userData = String(bytes: value)
-    ///     // Process each key-value pair as it's received
+    /// // Reverse scan with limit
+    /// for try await (key, value) in transaction.getRange(
+    ///     from: .firstGreaterOrEqual("user:"),
+    ///     to: .firstGreaterOrEqual("user;"),
+    ///     limit: 10,
+    ///     reverse: true
+    /// ) {
+    ///     print(key, value)
     /// }
     /// ```
     ///
@@ -49,7 +56,7 @@ extension FDB {
     ///
     /// - **Streaming**: Results are processed as they arrive, not buffered entirely in memory
     /// - **Background Pre-fetching**: Next batch is fetched concurrently while processing current batch
-    /// - **Configurable Batching**: Batch size can be tuned via `batchLimit` parameter
+    /// - **Configurable Streaming Mode**: Use `.wantAll` for bulk reads, `.iterator` for balanced reads
     /// - **Snapshot Consistency**: Supports both snapshot and non-snapshot reads
     ///
     /// ## Implementation Notes
@@ -58,8 +65,7 @@ extension FDB {
     /// 1. Starts pre-fetching the next batch immediately upon initialization
     /// 2. Continues pre-fetching in background while serving current batch items
     /// 3. Only blocks when transitioning between batches if pre-fetch isn't complete
-    ///
-    /// This design minimizes the impact of network latency on iteration performance.
+    /// 4. Tracks iteration count internally for ITERATOR streaming mode optimization
     public struct AsyncKVSequence: AsyncSequence {
         public typealias Element = (Bytes, Bytes)
 
@@ -69,10 +75,42 @@ extension FDB {
         let beginSelector: FDB.KeySelector
         /// Ending key selector for the range (exclusive)
         let endSelector: FDB.KeySelector
+        /// Maximum number of results to return (0 = unlimited)
+        let limit: Int
+        /// Whether to scan in reverse order
+        let reverse: Bool
         /// Whether to use snapshot reads
         let snapshot: Bool
-        /// Maximum number of key-value pairs to fetch per batch (0 = use FDB default)
-        let batchLimit: Int = 0
+        /// How to batch/stream results from the server
+        let streamingMode: StreamingMode
+
+        /// Creates a new AsyncKVSequence.
+        ///
+        /// - Parameters:
+        ///   - transaction: The transaction to use for range queries.
+        ///   - beginSelector: Starting key selector for the range.
+        ///   - endSelector: Ending key selector for the range (exclusive).
+        ///   - limit: Maximum results to return (0 = unlimited).
+        ///   - reverse: Whether to scan in reverse order.
+        ///   - snapshot: Whether to use snapshot isolation.
+        ///   - streamingMode: How to batch/stream results.
+        public init(
+            transaction: TransactionProtocol,
+            beginSelector: FDB.KeySelector,
+            endSelector: FDB.KeySelector,
+            limit: Int = 0,
+            reverse: Bool = false,
+            snapshot: Bool = false,
+            streamingMode: StreamingMode = .iterator
+        ) {
+            self.transaction = transaction
+            self.beginSelector = beginSelector
+            self.endSelector = endSelector
+            self.limit = limit
+            self.reverse = reverse
+            self.snapshot = snapshot
+            self.streamingMode = streamingMode
+        }
 
         /// Creates a new async iterator for this sequence.
         ///
@@ -85,8 +123,10 @@ extension FDB {
                 transaction: transaction,
                 beginSelector: beginSelector,
                 endSelector: endSelector,
+                limit: limit,
+                reverse: reverse,
                 snapshot: snapshot,
-                batchLimit: batchLimit
+                streamingMode: streamingMode
             )
         }
 
@@ -111,19 +151,29 @@ extension FDB {
         public struct AsyncIterator: AsyncIteratorProtocol {
             /// Transaction used for all range queries
             private let transaction: TransactionProtocol
-            /// Key selector for the next batch to fetch
+            /// Key selector for the next batch (forward: begin, reverse: end)
             private var nextBeginSelector: FDB.KeySelector
-            /// End key selector (remains constant)
-            private let endSelector: FDB.KeySelector
+            /// Key selector for the end boundary (forward: constant, reverse: updated)
+            private var nextEndSelector: FDB.KeySelector
+            /// Total limit for results (0 = unlimited)
+            private let limit: Int
+            /// Whether to scan in reverse order
+            private let reverse: Bool
             /// Whether to use snapshot reads
             private let snapshot: Bool
-            /// Batch size limit
-            private let batchLimit: Int
+            /// Streaming mode for batching
+            private let streamingMode: StreamingMode
+
+            // MARK: - Internal State
 
             /// Current batch of records being served
             private var currentBatch: ResultRange = .init(records: [], more: true)
             /// Index of next item to return from current batch
             private var currentIndex: Int = 0
+            /// Total number of items returned so far
+            private var totalReturned: Int = 0
+            /// Current iteration number for ITERATOR streaming mode
+            private var iteration: Int = 1
             /// Background task pre-fetching the next batch
             private var preFetchTask: Task<ResultRange?, Error>?
 
@@ -137,23 +187,43 @@ extension FDB {
                 currentIndex >= currentBatch.records.count
             }
 
+            /// Returns `true` if limit has been reached
+            private var limitReached: Bool {
+                limit > 0 && totalReturned >= limit
+            }
+
+            /// Remaining items to fetch considering limit
+            private var remainingLimit: Int {
+                guard limit > 0 else { return 0 }
+                return Swift.max(0, limit - totalReturned)
+            }
+
             /// Initializes the iterator and immediately starts pre-fetching the first batch.
             ///
             /// - Parameters:
             ///   - transaction: The transaction to use for range queries
             ///   - beginSelector: Starting key selector for the range
             ///   - endSelector: Ending key selector for the range (exclusive)
+            ///   - limit: Maximum results to return (0 = unlimited)
+            ///   - reverse: Whether to scan in reverse order
             ///   - snapshot: Whether to use snapshot reads
-            ///   - batchLimit: Maximum items per batch (0 = FDB default)
+            ///   - streamingMode: How to batch/stream results
             init(
-                transaction: TransactionProtocol, beginSelector: FDB.KeySelector,
-                endSelector: FDB.KeySelector, snapshot: Bool, batchLimit: Int
+                transaction: TransactionProtocol,
+                beginSelector: FDB.KeySelector,
+                endSelector: FDB.KeySelector,
+                limit: Int,
+                reverse: Bool,
+                snapshot: Bool,
+                streamingMode: StreamingMode
             ) {
                 self.transaction = transaction
-                nextBeginSelector = beginSelector
-                self.endSelector = endSelector
-                self.batchLimit = batchLimit
+                self.nextBeginSelector = beginSelector
+                self.nextEndSelector = endSelector
+                self.limit = limit
+                self.reverse = reverse
                 self.snapshot = snapshot
+                self.streamingMode = streamingMode
 
                 // Start fetching immediately to minimize latency on first next() call
                 startBackgroundPreFetch()
@@ -173,6 +243,13 @@ extension FDB {
             /// - Returns: The next key-value pair, or `nil` if sequence is exhausted
             /// - Throws: `FDBError` if the database operation fails
             public mutating func next() async throws -> Element? {
+                // Check if we've hit the limit
+                if limitReached {
+                    preFetchTask?.cancel()
+                    preFetchTask = nil
+                    return nil
+                }
+
                 if isExhausted {
                     return nil
                 }
@@ -188,6 +265,7 @@ extension FDB {
 
                 let keyValue = currentBatch.records[currentIndex]
                 currentIndex += 1
+                totalReturned += 1
                 return keyValue
             }
 
@@ -207,9 +285,18 @@ extension FDB {
                 currentBatch = nextBatch
                 currentIndex = 0
 
-                if !currentBatch.records.isEmpty, currentBatch.more {
+                if !currentBatch.records.isEmpty, currentBatch.more, !limitReached {
                     let lastKey = nextBatch.records.last!.0
-                    nextBeginSelector = FDB.KeySelector.firstGreaterThan(lastKey)
+                    if reverse {
+                        // Reverse mode: scan from end toward begin
+                        // Update end selector to continue from last returned key
+                        // Reference: FDB Python binding uses firstGreaterOrEqual(lastKey)
+                        nextEndSelector = FDB.KeySelector.firstGreaterOrEqual(lastKey)
+                    } else {
+                        // Forward mode: scan from begin toward end
+                        // Update begin selector to continue after last returned key
+                        nextBeginSelector = FDB.KeySelector.firstGreaterThan(lastKey)
+                    }
                     startBackgroundPreFetch()
                 } else {
                     preFetchTask = nil
@@ -226,15 +313,30 @@ extension FDB {
             /// is serving items from the current batch, minimizing blocking time
             /// during batch transitions.
             private mutating func startBackgroundPreFetch() {
+                let capturedTransaction = transaction
+                let capturedBeginSelector = nextBeginSelector
+                let capturedEndSelector = nextEndSelector
+                let capturedLimit = remainingLimit
+                let capturedReverse = reverse
+                let capturedSnapshot = snapshot
+                let capturedStreamingMode = streamingMode
+                let capturedIteration = iteration
+
                 preFetchTask = Task {
-                    [transaction, nextBeginSelector, endSelector, batchLimit, snapshot] in
-                    return try await transaction.getRangeNative(
-                        beginSelector: nextBeginSelector,
-                        endSelector: endSelector,
-                        limit: batchLimit,
-                        snapshot: snapshot
+                    return try await capturedTransaction.getRangeNative(
+                        beginSelector: capturedBeginSelector,
+                        endSelector: capturedEndSelector,
+                        limit: capturedLimit,
+                        targetBytes: 0,
+                        streamingMode: capturedStreamingMode,
+                        iteration: capturedIteration,
+                        reverse: capturedReverse,
+                        snapshot: capturedSnapshot
                     )
                 }
+
+                // Increment iteration for next fetch (ITERATOR mode optimization)
+                iteration += 1
             }
         }
     }

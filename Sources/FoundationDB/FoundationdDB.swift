@@ -112,34 +112,31 @@ public protocol TransactionProtocol: Sendable {
 
     /// Retrieves key-value pairs within a range using key selectors.
     ///
-    /// This method directly calls FDB's C `fdb_transaction_get_range()` API.
-    /// Prefer using `getRange()` instead, which returns an `AsyncSequence` for better ergonomics.
+    /// This is the low-level API that directly maps to FDB's C `fdb_transaction_get_range()`.
+    /// All C API parameters are exposed for advanced use cases.
+    ///
+    /// For most use cases, prefer using `getRange(from:to:...)` which returns an `AsyncSequence`.
     ///
     /// - Parameters:
     ///   - beginSelector: The key selector for the start of the range.
     ///   - endSelector: The key selector for the end of the range.
     ///   - limit: Maximum number of key-value pairs to return (0 for no limit).
+    ///   - targetBytes: Soft cap on bytes to return (0 for no limit).
+    ///   - streamingMode: How to batch/stream results from the server.
+    ///   - iteration: Iteration number for ITERATOR streaming mode (starts at 1).
+    ///   - reverse: Whether to scan in reverse lexicographical order.
     ///   - snapshot: Whether to perform a snapshot read.
     /// - Returns: A `ResultRange` containing the key-value pairs and more flag.
     /// - Throws: `FDBError` if the operation fails.
     func getRangeNative(
-        beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector, limit: Int, snapshot: Bool
-    ) async throws -> ResultRange
-
-    /// Retrieves key-value pairs within a range using byte array keys.
-    ///
-    /// This method directly calls FDB's C `fdb_transaction_get_range()` API.
-    /// Prefer using `getRange()` instead, which returns an `AsyncSequence` for better ergonomics.
-    ///
-    /// - Parameters:
-    ///   - beginKey: The start key of the range as a byte array.
-    ///   - endKey: The end key of the range as a byte array.
-    ///   - limit: Maximum number of key-value pairs to return (0 for no limit).
-    ///   - snapshot: Whether to perform a snapshot read.
-    /// - Returns: A `ResultRange` containing the key-value pairs and more flag.
-    /// - Throws: `FDBError` if the operation fails.
-    func getRangeNative(
-        beginKey: FDB.Bytes, endKey: FDB.Bytes, limit: Int, snapshot: Bool
+        beginSelector: FDB.KeySelector,
+        endSelector: FDB.KeySelector,
+        limit: Int,
+        targetBytes: Int,
+        streamingMode: FDB.StreamingMode,
+        iteration: Int,
+        reverse: Bool,
+        snapshot: Bool
     ) async throws -> ResultRange
 
     /// Commits the transaction.
@@ -325,52 +322,129 @@ extension TransactionProtocol {
         try await getKey(selector: selector, snapshot: snapshot)
     }
 
+    // MARK: - Legacy Range Query API (backward compatible)
+
     public func getRange(
         beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector, snapshot: Bool = false
     ) -> FDB.AsyncKVSequence {
-        FDB.AsyncKVSequence(
-            transaction: self,
-            beginSelector: beginSelector,
-            endSelector: endSelector,
-            snapshot: snapshot
-        )
+        getRange(from: beginSelector, to: endSelector, snapshot: snapshot)
     }
 
     public func getRange(
         beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector
     ) -> FDB.AsyncKVSequence {
-        getRange(
-            beginSelector: beginSelector, endSelector: endSelector, snapshot: false
-        )
+        getRange(from: beginSelector, to: endSelector)
     }
 
     public func getRange(
         begin: FDB.Selectable, end: FDB.Selectable, snapshot: Bool = false
     ) -> FDB.AsyncKVSequence {
-        let beginSelector = begin.toKeySelector()
-        let endSelector = end.toKeySelector()
-        return getRange(
-            beginSelector: beginSelector, endSelector: endSelector, snapshot: snapshot
-        )
+        getRange(from: begin.toKeySelector(), to: end.toKeySelector(), snapshot: snapshot)
     }
-
 
     public func getRange(
         beginKey: FDB.Bytes, endKey: FDB.Bytes, snapshot: Bool = false
     ) -> FDB.AsyncKVSequence {
-        let beginSelector = FDB.KeySelector.firstGreaterOrEqual(beginKey)
-        let endSelector = FDB.KeySelector.firstGreaterOrEqual(endKey)
-        return getRange(
-            beginSelector: beginSelector, endSelector: endSelector, snapshot: snapshot
+        getRange(from: beginKey, to: endKey, snapshot: snapshot)
+    }
+
+    // MARK: - New Range Query API
+
+    /// Returns an AsyncSequence that yields key-value pairs within a range.
+    ///
+    /// This is the recommended API for range queries with full control over
+    /// query parameters including reverse scanning and streaming mode.
+    ///
+    /// - Parameters:
+    ///   - begin: Key selector for the start of the range.
+    ///   - end: Key selector for the end of the range.
+    ///   - limit: Maximum number of key-value pairs to return (0 for unlimited).
+    ///   - reverse: Whether to scan in reverse lexicographical order.
+    ///   - snapshot: Whether to use snapshot isolation.
+    ///   - streamingMode: How to batch/stream results (default: .iterator).
+    /// - Returns: An async sequence that yields key-value pairs.
+    public func getRange(
+        from begin: FDB.KeySelector,
+        to end: FDB.KeySelector,
+        limit: Int = 0,
+        reverse: Bool = false,
+        snapshot: Bool = false,
+        streamingMode: FDB.StreamingMode = .iterator
+    ) -> FDB.AsyncKVSequence {
+        FDB.AsyncKVSequence(
+            transaction: self,
+            beginSelector: begin,
+            endSelector: end,
+            limit: limit,
+            reverse: reverse,
+            snapshot: snapshot,
+            streamingMode: streamingMode
         )
     }
 
-    func getRangeNative(
-        beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector, limit: Int = 0,
+    /// Returns an AsyncSequence for a key range using byte array keys.
+    public func getRange(
+        from beginKey: FDB.Bytes,
+        to endKey: FDB.Bytes,
+        limit: Int = 0,
+        reverse: Bool = false,
+        snapshot: Bool = false,
+        streamingMode: FDB.StreamingMode = .iterator
+    ) -> FDB.AsyncKVSequence {
+        getRange(
+            from: .firstGreaterOrEqual(beginKey),
+            to: .firstGreaterOrEqual(endKey),
+            limit: limit,
+            reverse: reverse,
+            snapshot: snapshot,
+            streamingMode: streamingMode
+        )
+    }
+
+    // MARK: - Low-Level Range Query API
+
+    /// Low-level range query with key selectors (backward compatible).
+    ///
+    /// This overload provides default values for the new parameters
+    /// to maintain backward compatibility with existing code.
+    public func getRangeNative(
+        beginSelector: FDB.KeySelector,
+        endSelector: FDB.KeySelector,
+        limit: Int = 0,
         snapshot: Bool = false
     ) async throws -> ResultRange {
         try await getRangeNative(
-            beginSelector: beginSelector, endSelector: endSelector, limit: limit, snapshot: snapshot
+            beginSelector: beginSelector,
+            endSelector: endSelector,
+            limit: limit,
+            targetBytes: 0,
+            streamingMode: .iterator,
+            iteration: 1,
+            reverse: false,
+            snapshot: snapshot
+        )
+    }
+
+    /// Low-level range query using byte array keys.
+    public func getRangeNative(
+        beginKey: FDB.Bytes,
+        endKey: FDB.Bytes,
+        limit: Int = 0,
+        targetBytes: Int = 0,
+        streamingMode: FDB.StreamingMode = .iterator,
+        iteration: Int = 1,
+        reverse: Bool = false,
+        snapshot: Bool = false
+    ) async throws -> ResultRange {
+        try await getRangeNative(
+            beginSelector: .firstGreaterOrEqual(beginKey),
+            endSelector: .firstGreaterOrEqual(endKey),
+            limit: limit,
+            targetBytes: targetBytes,
+            streamingMode: streamingMode,
+            iteration: iteration,
+            reverse: reverse,
+            snapshot: snapshot
         )
     }
 

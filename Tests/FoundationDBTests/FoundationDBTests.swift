@@ -1461,6 +1461,59 @@ func getRangeAsyncIteratorPrefetch() async throws {
     #expect(records.last!.0.hasPrefix("test_async_iter_0"), "Last record should be in expected range")
 }
 
+@Test("Pre-fetch task is cancelled when sequence exhausts")
+func testPreFetchCancelledOnExhaustion() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    // Use unique prefix to avoid conflicts with other tests
+    let testId = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "prefetch_cancel_\(testId)_"
+
+    // Setup: insert small amount of data
+    try await database.withTransaction { transaction in
+        for i in 0..<5 {
+            let key = "\(testPrefix)data_\(i)"
+            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+        }
+    }
+
+    // Run multiple iterations to increase chance of catching race condition
+    // If pre-fetch task is not cancelled on exhaustion, this will fail with
+    // "Operation issued while a commit was outstanding" error
+    for iteration in 0..<20 {
+        try await database.withTransaction { transaction in
+            let sequence = transaction.getRange(
+                from: .firstGreaterOrEqual(Array("\(testPrefix)data_".utf8)),
+                to: .firstGreaterOrEqual(Array("\(testPrefix)data`".utf8)),
+                streamingMode: .iterator
+            )
+
+            // Iterate through all items to exhaust the sequence
+            var count = 0
+            for try await _ in sequence {
+                count += 1
+            }
+
+            #expect(count == 5, "Should read all 5 records")
+
+            // Write immediately after iteration completes (to different key range)
+            // If pre-fetch task is still running, this will cause
+            // "Operation issued while a commit was outstanding" on commit
+            let markerKey = "\(testPrefix)marker_\(iteration)"
+            transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
+        }
+    }
+
+    // Cleanup
+    try await database.withTransaction { transaction in
+        transaction.clearRange(
+            beginKey: Array(testPrefix.utf8),
+            endKey: Array((testPrefix + "~").utf8)
+        )
+    }
+}
+
 extension String {
     func leftPad(toLength: Int, withPad pad: String) -> String {
         if count >= toLength { return self }

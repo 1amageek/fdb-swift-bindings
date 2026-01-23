@@ -148,7 +148,14 @@ extension FDB {
         ///
         /// This iterator is **not** thread-safe. Each iterator should be used by a single task.
         /// Multiple iterators can be created from the same sequence for concurrent processing.
-        public struct AsyncIterator: AsyncIteratorProtocol {
+        ///
+        /// ## Lifecycle Management
+        ///
+        /// This is a `class` (not `struct`) to enable automatic cleanup via `deinit`.
+        /// When iteration is abandoned (e.g., via `break` in a `for await` loop),
+        /// the background pre-fetch Task is automatically cancelled, preventing
+        /// "Operation issued while a commit was outstanding" errors.
+        public final class AsyncIterator: AsyncIteratorProtocol {
             /// Transaction used for all range queries
             private let transaction: TransactionProtocol
             /// Key selector for the next batch (forward: begin, reverse: end)
@@ -198,6 +205,14 @@ extension FDB {
                 return Swift.max(0, limit - totalReturned)
             }
 
+            /// Cancels any running pre-fetch task when the iterator is deallocated.
+            ///
+            /// This ensures that abandoning iteration (e.g., via `break`) properly cleans up
+            /// background tasks, preventing conflicts with subsequent transaction operations.
+            deinit {
+                preFetchTask?.cancel()
+            }
+
             /// Initializes the iterator and immediately starts pre-fetching the first batch.
             ///
             /// - Parameters:
@@ -242,7 +257,7 @@ extension FDB {
             ///
             /// - Returns: The next key-value pair, or `nil` if sequence is exhausted
             /// - Throws: `FDBError` if the database operation fails
-            public mutating func next() async throws -> Element? {
+            public func next() async throws -> Element? {
                 // Check if we've hit the limit
                 if limitReached {
                     preFetchTask?.cancel()
@@ -251,6 +266,11 @@ extension FDB {
                 }
 
                 if isExhausted {
+                    // Cancel any pending pre-fetch task to avoid
+                    // "Operation issued while a commit was outstanding" errors
+                    // when the transaction commits after iteration completes
+                    preFetchTask?.cancel()
+                    preFetchTask = nil
                     return nil
                 }
 
@@ -276,7 +296,7 @@ extension FDB {
             /// updates the iterator state, and starts pre-fetching the subsequent batch.
             ///
             /// - Throws: `FDBError` if the pre-fetch operation failed
-            private mutating func updateCurrentBatch() async throws {
+            private func updateCurrentBatch() async throws {
                 guard let nextBatch = try await preFetchTask?.value else {
                     throw FDBError(.clientError)
                 }
@@ -312,7 +332,7 @@ extension FDB {
             /// The pre-fetch runs independently and can complete while the iterator
             /// is serving items from the current batch, minimizing blocking time
             /// during batch transitions.
-            private mutating func startBackgroundPreFetch() {
+            private func startBackgroundPreFetch() {
                 let capturedTransaction = transaction
                 let capturedBeginSelector = nextBeginSelector
                 let capturedEndSelector = nextEndSelector

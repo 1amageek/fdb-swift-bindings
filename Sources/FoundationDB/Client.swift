@@ -52,6 +52,22 @@ public final class FDBClient: Sendable {
     /// Returns true if FDB network is initialized.
     public static var isInitialized: Bool { FDBNetwork.shared.isInitialized }
 
+    /// Explicitly stops the FoundationDB network.
+    ///
+    /// This method is optional — if not called, the OS safely reclaims all
+    /// resources at process exit. Use this for graceful shutdown in servers
+    /// or for cleanup in tests.
+    ///
+    /// **Correct shutdown order:**
+    /// 1. Complete all pending transactions
+    /// 2. Release all `FDBDatabase` references (ARC triggers `fdb_database_destroy`)
+    /// 3. Call `FDBClient.shutdown()`
+    ///
+    /// A `precondition` failure occurs if active `FDBDatabase` instances remain.
+    public static func shutdown() {
+        FDBNetwork.shared.shutdown()
+    }
+
     /// Opens a connection to a FoundationDB database.
     ///
     /// Creates and returns a database handle that can be used to create transactions

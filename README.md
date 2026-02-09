@@ -61,6 +61,25 @@ try await database.withTransaction { transaction in
 }
 ```
 
+### Lifecycle Management
+
+FDB resources are managed automatically via ARC and are safe at process exit.
+For explicit shutdown (tests, graceful server termination):
+
+```swift
+// 1. Release all database references
+database = nil  // triggers fdb_database_destroy via ARC
+
+// 2. Stop the network
+FDBClient.shutdown()  // fdb_stop_network + thread join
+```
+
+**Important**: `shutdown()` requires all `FDBDatabase` instances to be released first.
+A `precondition` failure occurs if active databases remain.
+
+If `shutdown()` is not called, the OS reclaims all resources at process exit.
+This is safe — FoundationDB is transactional and the server handles client disconnects gracefully.
+
 ## Requirements
 
 - Swift 6.1+

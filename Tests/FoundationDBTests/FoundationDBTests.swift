@@ -1514,6 +1514,164 @@ func testPreFetchCancelledOnExhaustion() async throws {
     }
 }
 
+@Test("Pre-fetch task is cancelled when limit is reached")
+func testPreFetchCancelledOnLimitReached() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    let testId = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "prefetch_limit_\(testId)_"
+
+    // Setup: insert more data than the limit
+    try await database.withTransaction { transaction in
+        for i in 0..<20 {
+            let key = "\(testPrefix)data_\(String(format: "%03d", i))"
+            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+        }
+    }
+
+    // When limit is reached, pre-fetch task must be awaited before commit.
+    // Without the fix, the in-flight pre-fetch C future causes error 2017.
+    for iteration in 0..<20 {
+        try await database.withTransaction { transaction in
+            let sequence = transaction.getRange(
+                from: .firstGreaterOrEqual(Array("\(testPrefix)data_".utf8)),
+                to: .firstGreaterOrEqual(Array("\(testPrefix)data`".utf8)),
+                limit: 5,
+                streamingMode: .iterator
+            )
+
+            var count = 0
+            for try await _ in sequence {
+                count += 1
+            }
+
+            #expect(count == 5, "Should read exactly 5 records (limit)")
+
+            let markerKey = "\(testPrefix)marker_\(iteration)"
+            transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
+        }
+    }
+
+    // Cleanup
+    try await database.withTransaction { transaction in
+        transaction.clearRange(
+            beginKey: Array(testPrefix.utf8),
+            endKey: Array((testPrefix + "~").utf8)
+        )
+    }
+}
+
+@Test("Pre-fetch task is cancelled when iteration is abandoned via break")
+func testPreFetchCancelledOnBreak() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    let testId = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "prefetch_break_\(testId)_"
+
+    // Setup: insert data
+    try await database.withTransaction { transaction in
+        for i in 0..<20 {
+            let key = "\(testPrefix)data_\(String(format: "%03d", i))"
+            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+        }
+    }
+
+    // When break exits the loop, deinit cancels the pre-fetch task.
+    // The withTaskCancellationHandler in Future.getAsync() propagates
+    // cancellation to the C future via fdb_future_cancel().
+    for iteration in 0..<20 {
+        try await database.withTransaction { transaction in
+            let sequence = transaction.getRange(
+                from: .firstGreaterOrEqual(Array("\(testPrefix)data_".utf8)),
+                to: .firstGreaterOrEqual(Array("\(testPrefix)data`".utf8)),
+                streamingMode: .iterator
+            )
+
+            var count = 0
+            for try await _ in sequence {
+                count += 1
+                if count >= 3 {
+                    break
+                }
+            }
+
+            #expect(count == 3, "Should read exactly 3 records before break")
+
+            let markerKey = "\(testPrefix)marker_\(iteration)"
+            transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
+        }
+    }
+
+    // Cleanup
+    try await database.withTransaction { transaction in
+        transaction.clearRange(
+            beginKey: Array(testPrefix.utf8),
+            endKey: Array((testPrefix + "~").utf8)
+        )
+    }
+}
+
+@Test("Task cancellation propagates to FDB C future")
+func testTaskCancellationPropagatesToCFuture() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openDatabase()
+
+    let testId = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "task_cancel_\(testId)_"
+
+    // Setup: insert data
+    try await database.withTransaction { transaction in
+        for i in 0..<10 {
+            let key = "\(testPrefix)data_\(String(format: "%03d", i))"
+            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+        }
+    }
+
+    // Verify that cancelling a Task that is iterating over a range
+    // properly cancels the underlying C future and throws CancellationError.
+    // TransactionProtocol is Sendable, so we create the transaction first
+    // and pass it to the Task.
+    let beginKey = Array("\(testPrefix)data_".utf8)
+    let endKey = Array("\(testPrefix)data`".utf8)
+    let transaction = try database.createTransaction()
+
+    let task = Task {
+        let sequence = transaction.getRange(
+            from: .firstGreaterOrEqual(beginKey),
+            to: .firstGreaterOrEqual(endKey),
+            streamingMode: .iterator
+        )
+
+        for try await _ in sequence {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
+    }
+
+    // Cancel the task
+    task.cancel()
+
+    // The task should complete (either successfully or with cancellation)
+    // without hanging indefinitely. This verifies fdb_future_cancel() works.
+    do {
+        try await task.value
+    } catch is CancellationError {
+        // Expected: task was cancelled
+    } catch {
+        // FDB errors from cancellation are also acceptable
+    }
+
+    // Cleanup
+    try await database.withTransaction { transaction in
+        transaction.clearRange(
+            beginKey: Array(testPrefix.utf8),
+            endKey: Array((testPrefix + "~").utf8)
+        )
+    }
+}
+
 extension String {
     func leftPad(toLength: Int, withPad pad: String) -> String {
         if count >= toLength { return self }

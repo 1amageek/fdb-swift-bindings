@@ -244,6 +244,19 @@ extension FDB {
                 startBackgroundPreFetch()
             }
 
+            /// Cancels the pre-fetch task and waits for it to complete.
+            ///
+            /// This ensures no in-flight FDB operations remain when iteration ends,
+            /// preventing "Operation issued while a commit was outstanding" errors.
+            /// Combined with `withTaskCancellationHandler` in `Future.getAsync()`,
+            /// the C future is cancelled immediately, so this await completes quickly.
+            private func cancelAndWaitForPreFetch() async {
+                guard let task = preFetchTask else { return }
+                preFetchTask = nil
+                task.cancel()
+                _ = try? await task.value
+            }
+
             /// Returns the next key-value pair in the sequence.
             ///
             /// This method implements the core iteration logic with optimal performance:
@@ -260,17 +273,12 @@ extension FDB {
             public func next() async throws -> Element? {
                 // Check if we've hit the limit
                 if limitReached {
-                    preFetchTask?.cancel()
-                    preFetchTask = nil
+                    await cancelAndWaitForPreFetch()
                     return nil
                 }
 
                 if isExhausted {
-                    // Cancel any pending pre-fetch task to avoid
-                    // "Operation issued while a commit was outstanding" errors
-                    // when the transaction commits after iteration completes
-                    preFetchTask?.cancel()
-                    preFetchTask = nil
+                    await cancelAndWaitForPreFetch()
                     return nil
                 }
 

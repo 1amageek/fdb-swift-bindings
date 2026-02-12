@@ -65,28 +65,35 @@ class Future<T: FutureResult> {
     ///
     /// This method bridges FoundationDB's callback-based API with Swift's async/await,
     /// allowing the caller to await the result of the underlying C future.
+    /// Swift Task cancellation is propagated to the C layer via `fdb_future_cancel()`.
     ///
     /// - Returns: The result value extracted from the future, or nil if no value is present.
-    /// - Throws: `FDBError` if the future operation failed.
+    /// - Throws: `FDBError` if the future operation failed or was cancelled.
     func getAsync() async throws -> T? {
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<T?, Error>) in
-            let box = CallbackBox { [continuation] future in
-                do {
-                    let err = fdb_future_get_error(future)
-                    if err != 0 {
-                        throw FDBError(code: err)
+        // FDB C API: "All future functions are safe for use from any thread"
+        nonisolated(unsafe) let cFuture = self.cFuture
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<T?, Error>) in
+                let box = CallbackBox { [continuation] future in
+                    do {
+                        let err = fdb_future_get_error(future)
+                        if err != 0 {
+                            throw FDBError(code: err)
+                        }
+
+                        let value = try T.extract(fromFuture: cFuture)
+                        continuation.resume(returning: value)
+                    } catch {
+                        continuation.resume(throwing: error)
                     }
-
-                    let value = try T.extract(fromFuture: self.cFuture)
-                    continuation.resume(returning: value)
-                } catch {
-                    continuation.resume(throwing: error)
                 }
-            }
 
-            let userdata = Unmanaged.passRetained(box).toOpaque() // TODO: If future is canceled, this will not cleanup?
-            fdb_future_set_callback(cFuture, fdbFutureCallback, userdata)
+                let userdata = Unmanaged.passRetained(box).toOpaque()
+                fdb_future_set_callback(cFuture, fdbFutureCallback, userdata)
+            }
+        } onCancel: {
+            fdb_future_cancel(cFuture)
         }
     }
 }

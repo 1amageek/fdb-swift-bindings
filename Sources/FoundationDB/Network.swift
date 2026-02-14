@@ -35,10 +35,10 @@ import Synchronization
 /// ## Lifecycle
 ///
 /// - `initialize(version:)` starts the network thread (once per process).
-/// - `shutdown()` stops the network explicitly. All `FDBDatabase` instances
-///   must be released before calling this.
-/// - If `shutdown()` is not called, the OS reclaims resources at process exit.
-///   This is safe — FoundationDB is transactional.
+/// - `shutdown()` stops the network and waits for the network thread to exit
+///   via `pthread_join`. All `FDBDatabase` instances should be released before
+///   calling this.
+/// - The FDB C API does not support re-initialization after shutdown.
 ///
 /// ## Usage Example
 /// ```swift
@@ -46,34 +46,56 @@ import Synchronization
 /// let database = try FDBClient.openDatabase()
 /// // ... use database ...
 /// database = nil          // release database first
-/// FDBClient.shutdown()    // then stop network
+/// FDBClient.shutdown()    // stops network, joins thread, process can exit
 /// ```
 final class FDBNetwork: Sendable {
+
+    /// Internal lifecycle state.
+    ///
+    /// `@unchecked Sendable` because `pthread_t` is not `Sendable`,
+    /// but all access is guarded by `Mutex`.
+    private struct State: @unchecked Sendable {
+        var phase: Phase = .uninitialized
+        var databaseCount: Int = 0
+        var networkThread: pthread_t? = nil
+
+        enum Phase: Sendable {
+            case uninitialized
+            case running
+            case stopped
+        }
+    }
+
     /// The shared singleton instance of the network manager.
     static let shared = FDBNetwork()
 
-    /// Whether the network has been initialized.
-    private let initialized = Mutex<Bool>(false)
-
-    /// Number of active `FDBDatabase` instances.
-    private let databaseCount = Mutex<Int>(0)
+    /// All mutable state consolidated into a single Mutex.
+    private let state = Mutex<State>(State())
 
     /// Initializes the FoundationDB network with the specified API version.
     ///
     /// This method performs the complete network initialization sequence:
     /// selecting the API version, setting up the network, and starting the network thread.
+    /// Can only be called once per process.
     ///
     /// - Parameter version: The FoundationDB API version to use.
     /// - Throws: `FDBError` if any step of initialization fails.
     func initialize(version: Int) throws {
-        try initialized.withLock { initialized in
-            guard !initialized else {
+        try state.withLock { state in
+            switch state.phase {
+            case .uninitialized:
+                try selectAPIVersion(Int32(version))
+                try setupNetwork()
+                startNetwork(state: &state)
+                state.phase = .running
+            case .running:
                 throw FDBError(.networkError)
+            case .stopped:
+                fatalError(
+                    "FDB network cannot be restarted after shutdown. "
+                    + "This is a FoundationDB C API limitation."
+                )
             }
-            try selectAPIVersion(Int32(version))
-            try setupNetwork()
-            startNetwork()
-            initialized = true
         }
     }
 
@@ -81,49 +103,81 @@ final class FDBNetwork: Sendable {
     ///
     /// Called by `FDBDatabase.init` to track active database connections.
     func trackDatabase() {
-        databaseCount.withLock { $0 += 1 }
+        state.withLock { state in
+            assert(
+                state.phase == .running,
+                "trackDatabase() called when network is not running (phase: \(state.phase))"
+            )
+            state.databaseCount += 1
+        }
     }
 
     /// Unregisters an `FDBDatabase` instance.
     ///
     /// Called by `FDBDatabase.deinit` after `fdb_database_destroy`.
     func releaseDatabase() {
-        databaseCount.withLock { $0 -= 1 }
+        state.withLock { state in
+            state.databaseCount -= 1
+        }
     }
 
-    /// Explicitly stops the FoundationDB network.
+    /// Explicitly stops the FoundationDB network and waits for the
+    /// network thread to exit.
     ///
-    /// All `FDBDatabase` instances must be released before calling this method.
-    /// A `precondition` failure occurs if active databases remain.
+    /// All `FDBDatabase` instances should be released before calling this.
+    /// In debug builds, an assertion failure occurs if active databases remain.
     ///
-    /// After calling this, `fdb_run_network()` returns on its thread.
-    /// This method is optional — if not called, the OS reclaims all resources at process exit.
+    /// This method is idempotent — calling it multiple times is safe.
+    ///
+    /// After this method returns, the network thread has fully exited and
+    /// the process can terminate naturally without `Foundation.exit()`.
     func shutdown() {
-        let activeCount = databaseCount.withLock { $0 }
-        precondition(
-            activeCount == 0,
-            "All FDBDatabase instances must be released before shutdown. Active: \(activeCount)"
-        )
-        initialized.withLock { initialized in
-            guard initialized else { return }
+        // Phase 1: Under lock — signal stop, extract thread handle
+        let thread: pthread_t? = state.withLock { state in
+            guard state.phase == .running else { return nil }
+
+            if state.databaseCount > 0 {
+                assertionFailure(
+                    "FDBNetwork.shutdown() called with \(state.databaseCount) active "
+                    + "FDBDatabase instance(s). Release all databases before shutdown."
+                )
+            }
+
             let error = fdb_stop_network()
             if error != 0 {
-                fatalError("Failed to stop network: \(FDBError(code: error).description)")
+                fatalError(
+                    "Failed to stop FDB network: \(FDBError(code: error).description)"
+                )
             }
-            initialized = false
+
+            state.phase = .stopped
+            let handle = state.networkThread
+            state.networkThread = nil
+            return handle
+        }
+
+        // Phase 2: Outside lock — join the network thread.
+        // Must be outside the lock to avoid deadlock: the network thread
+        // may call releaseDatabase() during its wind-down, which acquires
+        // the same Mutex.
+        if let thread {
+            pthread_join(thread, nil)
         }
     }
 
     /// Intentionally empty.
     ///
     /// At process exit, the destruction order of static variables is undefined.
-    /// Calling `fdb_stop_network()` here while `FDBDatabase` instances are still
-    /// alive causes a crash in the C++ runtime (DatabaseContext::~DatabaseContext).
-    /// The OS reclaims all process resources safely.
+    /// Calling `fdb_stop_network()` here while other resources are still alive
+    /// causes crashes. The OS reclaims all process resources safely.
     deinit {}
 
-    /// Returns true if FDB network is initialized.
-    public var isInitialized: Bool { initialized.withLock { $0 } }
+    /// Returns true if FDB network is initialized and running.
+    public var isInitialized: Bool {
+        state.withLock { $0.phase == .running }
+    }
+
+    // MARK: - Network Options
 
     /// Sets a network option with an optional byte array value.
     ///
@@ -171,6 +225,8 @@ final class FDBNetwork: Sendable {
         try setNetworkOption(to: valueBytes, forOption: option)
     }
 
+    // MARK: - Private
+
     /// Selects the FoundationDB API version.
     ///
     /// - Parameter version: The API version to select.
@@ -194,19 +250,22 @@ final class FDBNetwork: Sendable {
         }
     }
 
-    /// Starts the FoundationDB network thread.
+    /// Starts the FoundationDB network thread (joinable, NOT detached).
     ///
-    /// Creates a detached pthread that runs the FoundationDB network event loop.
-    /// The thread runs until `fdb_stop_network()` is called or the process exits.
-    private func startNetwork() {
-        var thread = pthread_t(bitPattern: 0)
-        pthread_create(&thread, nil, { _ in
+    /// The thread handle is stored in `state.networkThread` so it can be
+    /// joined during `shutdown()`.
+    ///
+    /// - Parameter state: Mutable reference to the current state (must be called under lock).
+    private func startNetwork(state: inout State) {
+        var thread: pthread_t?
+        let result = pthread_create(&thread, nil, { _ in
             let error = fdb_run_network()
             if error != 0 {
                 fatalError("Network thread error: \(FDBError(code: error).description)")
             }
             return nil
         }, nil)
-        pthread_detach(thread!)
+        precondition(result == 0, "Failed to create FDB network thread (errno: \(result))")
+        state.networkThread = thread
     }
 }

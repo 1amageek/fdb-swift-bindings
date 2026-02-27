@@ -66,7 +66,7 @@ extension FDB {
     /// 2. Continues pre-fetching in background while serving current batch items
     /// 3. Only blocks when transitioning between batches if pre-fetch isn't complete
     /// 4. Tracks iteration count internally for ITERATOR streaming mode optimization
-    public struct AsyncKVSequence: AsyncSequence {
+    public struct AsyncKVSequence: AsyncSequence, Sendable {
         public typealias Element = (Bytes, Bytes)
 
         /// The transaction used for range queries

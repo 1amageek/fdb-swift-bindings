@@ -89,7 +89,7 @@ extension Tuple {
         }
 
         let offset = UInt32(position)
-        packed.append(contentsOf: withUnsafeBytes(of: offset.littleEndian) { Array($0) })
+        withUnsafeBytes(of: offset.littleEndian) { packed.append(contentsOf: $0) }
 
         return packed
     }
@@ -108,11 +108,11 @@ extension Tuple {
     /// Count incomplete versionstamps in tuple
     /// - Returns: Number of incomplete versionstamps
     public func countIncompleteVersionstamps() -> Int {
-        return elements.reduce(0) { count, element in
-            if let vs = element as? Versionstamp, !vs.isComplete {
-                return count + 1
+        return elements.count { element in
+            if let vs = element as? Versionstamp {
+                return !vs.isComplete
             }
-            return count
+            return false
         }
     }
 
@@ -121,7 +121,7 @@ extension Tuple {
     public func validateForVersionstamp() throws {
         let incompleteCount = countIncompleteVersionstamps()
 
-        guard incompleteCount == 1 else {
+        if incompleteCount != 1 {
             throw TupleError.invalidEncoding
         }
     }

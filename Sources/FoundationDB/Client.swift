@@ -52,6 +52,21 @@ public final class FDBClient: Sendable {
     /// Returns true if FDB network is initialized.
     public static var isInitialized: Bool { FDBNetwork.shared.isInitialized }
 
+    /// Explicitly stops the FoundationDB network and waits for the
+    /// network thread to exit.
+    ///
+    /// **Correct shutdown order:**
+    /// 1. Complete all pending transactions
+    /// 2. Release all `FDBDatabase` references (ARC triggers `fdb_database_destroy`)
+    /// 3. Call `FDBClient.shutdown()`
+    ///
+    /// This method blocks until the network thread has fully exited.
+    /// It is idempotent — calling it multiple times is safe.
+    /// After shutdown, the process can exit naturally without `Foundation.exit()`.
+    public static func shutdown() {
+        FDBNetwork.shared.shutdown()
+    }
+
     /// Opens a connection to a FoundationDB database.
     ///
     /// Creates and returns a database handle that can be used to create transactions
@@ -61,6 +76,10 @@ public final class FDBClient: Sendable {
     /// - Returns: An `FDBDatabase` instance for performing database operations.
     /// - Throws: `FDBError` if the database connection cannot be established.
     public static func openDatabase(clusterFilePath: String? = nil) throws -> FDBDatabase {
+        guard FDBNetwork.shared.isInitialized else {
+            throw FDBError(.networkError)
+        }
+
         var database: OpaquePointer?
         let error = fdb_create_database(clusterFilePath, &database)
         if error != 0 {

@@ -39,11 +39,16 @@ public final class FDBDatabase: DatabaseProtocol {
     /// - Parameter database: The underlying FoundationDB database pointer.
     init(database: OpaquePointer) {
         self.database = database
+        FDBNetwork.shared.trackDatabase()
     }
 
     /// Cleans up the database connection when the instance is deallocated.
+    ///
+    /// Destroys the underlying C database handle first, then notifies
+    /// `FDBNetwork` that this database is no longer active.
     deinit {
         fdb_database_destroy(database)
+        FDBNetwork.shared.releaseDatabase()
     }
 
     /// Creates a new transaction for database operations.

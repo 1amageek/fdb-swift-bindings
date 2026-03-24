@@ -29,49 +29,49 @@ struct StringIncrementTests {
     @Test("strinc increments normal byte array")
     func strincNormal() throws {
         let input: FDB.Bytes = [0x01, 0x02, 0x03]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x01, 0x02, 0x04])
     }
 
     @Test("strinc increments single byte")
     func strincSingleByte() throws {
         let input: FDB.Bytes = [0x42]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x43])
     }
 
     @Test("strinc strips trailing 0xFF and increments")
     func strincWithTrailing0xFF() throws {
         let input: FDB.Bytes = [0x01, 0x02, 0xFF]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x01, 0x03])
     }
 
     @Test("strinc strips multiple trailing 0xFF bytes")
     func strincWithMultipleTrailing0xFF() throws {
         let input: FDB.Bytes = [0x01, 0xFF, 0xFF]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x02])
     }
 
     @Test("strinc handles complex case")
     func strincComplex() throws {
         let input: FDB.Bytes = [0x01, 0x02, 0xFF, 0xFF, 0xFF]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x01, 0x03])
     }
 
     @Test("strinc handles 0xFE correctly")
     func strinc0xFE() throws {
         let input: FDB.Bytes = [0x01, 0xFE]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x01, 0xFF])
     }
 
     @Test("strinc handles overflow to 0xFF")
     func strincOverflowTo0xFF() throws {
         let input: FDB.Bytes = [0x00, 0xFE]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x00, 0xFF])
     }
 
@@ -82,14 +82,11 @@ struct StringIncrementTests {
         let input: FDB.Bytes = [0xFF, 0xFF]
 
         do {
-            _ = try input.strinc()
+            _ = try FDB.strinc(input)
             Issue.record("Should throw error for all-0xFF input")
         } catch let error as SubspaceError {
-            if case .cannotIncrementKey(let message) = error {
-                #expect(message.contains("0xFF"))
-            } else {
-                Issue.record("Wrong error case")
-            }
+            #expect(error.code == .cannotIncrementKey)
+            #expect(error.message.contains("0xFF"))
         } catch {
             Issue.record("Wrong error type: \(error)")
         }
@@ -100,14 +97,11 @@ struct StringIncrementTests {
         let input: FDB.Bytes = []
 
         do {
-            _ = try input.strinc()
+            _ = try FDB.strinc(input)
             Issue.record("Should throw error for empty input")
         } catch let error as SubspaceError {
-            if case .cannotIncrementKey(let message) = error {
-                #expect(message.contains("0xFF"))
-            } else {
-                Issue.record("Wrong error case")
-            }
+            #expect(error.code == .cannotIncrementKey)
+            #expect(error.message.contains("0xFF"))
         } catch {
             Issue.record("Wrong error type: \(error)")
         }
@@ -118,14 +112,10 @@ struct StringIncrementTests {
         let input: FDB.Bytes = [0xFF]
 
         do {
-            _ = try input.strinc()
+            _ = try FDB.strinc(input)
             Issue.record("Should throw error for single 0xFF")
         } catch let error as SubspaceError {
-            if case .cannotIncrementKey = error {
-                // Expected
-            } else {
-                Issue.record("Wrong error case")
-            }
+            #expect(error.code == .cannotIncrementKey)
         } catch {
             Issue.record("Wrong error type: \(error)")
         }
@@ -146,7 +136,7 @@ struct StringIncrementTests {
         ]
 
         for (input, expected) in testCases {
-            let result = try input.strinc()
+            let result = try FDB.strinc(input)
             #expect(result == expected,
                    "strinc(\(input.map { String(format: "%02x", $0) }.joined(separator: " "))) should equal \(expected.map { String(format: "%02x", $0) }.joined(separator: " "))")
         }
@@ -162,7 +152,7 @@ struct StringIncrementTests {
         ]
 
         for (input, expected) in testCases {
-            let result = try input.strinc()
+            let result = try FDB.strinc(input)
             #expect(result == expected)
         }
     }
@@ -174,21 +164,21 @@ struct StringIncrementTests {
         // When incrementing 0xFF, it wraps to 0x00 (via &+ operator)
         // But since we increment the LAST non-0xFF byte, this should work
         let input: FDB.Bytes = [0x01, 0xFF, 0xFF]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0x02])
     }
 
     @Test("strinc preserves leading bytes")
     func strincPreservesLeading() throws {
         let input: FDB.Bytes = [0xAA, 0xBB, 0xCC, 0xFF, 0xFF]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0xAA, 0xBB, 0xCD])
     }
 
     @Test("strinc works with maximum non-0xFF value")
     func strincMaxNon0xFF() throws {
         let input: FDB.Bytes = [0xFE]
-        let result = try input.strinc()
+        let result = try FDB.strinc(input)
         #expect(result == [0xFF])
     }
 }

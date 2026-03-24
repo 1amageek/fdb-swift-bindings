@@ -231,8 +231,14 @@ public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
     }
 
     public func getRangeNative(
-        beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector, limit: Int = 0,
-        snapshot: Bool = false
+        beginSelector: FDB.KeySelector,
+        endSelector: FDB.KeySelector,
+        limit: Int,
+        targetBytes: Int,
+        streamingMode: FDB.StreamingMode,
+        iteration: Int,
+        reverse: Bool,
+        snapshot: Bool
     ) async throws -> ResultRange {
         let future = beginSelector.key.withUnsafeBytes { beginKeyBytes in
             endSelector.key.withUnsafeBytes { endKeyBytes in
@@ -248,42 +254,11 @@ public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
                         endSelector.orEqual ? 1 : 0,
                         Int32(endSelector.offset),
                         Int32(limit),
-                        0, // target_bytes = 0 (no limit)
-                        FDBStreamingMode(-1), // mode = FDB_STREAMING_MODE_ITERATOR
-                        1, // iteration = 1
+                        Int32(targetBytes),
+                        FDBStreamingMode(streamingMode.rawValue),
+                        Int32(iteration),
                         snapshot ? 1 : 0,
-                        0 // reverse = false
-                    )
-                )
-            }
-        }
-
-        return try await future.getAsync() ?? ResultRange(records: [], more: false)
-    }
-
-
-    public func getRangeNative(
-        beginKey: FDB.Bytes, endKey: FDB.Bytes, limit: Int = 0, snapshot: Bool = false
-    ) async throws -> ResultRange {
-        let future = beginKey.withUnsafeBytes { beginKeyBytes in
-            endKey.withUnsafeBytes { endKeyBytes in
-                Future<ResultRange>(
-                    fdb_transaction_get_range(
-                        transaction,
-                        beginKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(beginKey.count),
-                        1, // begin_or_equal = true
-                        0, // begin_offset = 0
-                        endKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(endKey.count),
-                        1, // end_or_equal = false (exclusive)
-                        0, // end_offset = 0
-                        Int32(limit),
-                        0, // target_bytes = 0 (no limit)
-                        FDBStreamingMode(-1), // mode = FDB_STREAMING_MODE_ITERATOR
-                        1, // iteration = 1
-                        snapshot ? 1 : 0,
-                        0 // reverse = false
+                        reverse ? 1 : 0
                     )
                 )
             }

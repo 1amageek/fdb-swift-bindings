@@ -84,30 +84,14 @@ public struct DirectorySubspace: Sendable, Equatable, Hashable {
         self.type = type
     }
 
-    /// Initialize DirectorySubspace from Subspace (for backward compatibility)
-    ///
-    /// - Parameters:
-    ///   - subspace: Subspace with the prefix assigned by Directory Layer
-    ///   - path: Full directory path
-    ///   - layer: Layer type (optional)
-    public init(
-        subspace: Subspace,
-        path: [String],
-        type: DirectoryType?
-    ) {
-        self.subspace = subspace
-        self.path = path
-        self.type = type
-    }
-
     // MARK: - Subspace Operations
 
     /// Pack tuple into key
     ///
     /// - Parameter tuple: Tuple to pack
     /// - Returns: Key with prefix
-    public func pack(_ tuple: Tuple) -> Data {
-        Data(self.subspace.pack(tuple))
+    public func pack(_ tuple: Tuple) -> FDB.Bytes {
+        self.subspace.pack(tuple)
     }
 
     /// Unpack key into tuple
@@ -115,8 +99,8 @@ public struct DirectorySubspace: Sendable, Equatable, Hashable {
     /// - Parameter key: Key to unpack
     /// - Returns: Unpacked tuple
     /// - Throws: If key doesn't belong to this subspace
-    public func unpack(_ key: Data) throws -> Tuple {
-        try self.subspace.unpack(Array(key))
+    public func unpack(_ key: FDB.Bytes) throws -> Tuple {
+        try self.subspace.unpack(key)
     }
 
     /// Create a subspace
@@ -138,8 +122,8 @@ public struct DirectorySubspace: Sendable, Equatable, Hashable {
     ///
     /// - Parameter key: Key to check
     /// - Returns: true if key belongs to this subspace
-    public func contains(_ key: Data) -> Bool {
-        self.subspace.contains(Array(key))
+    public func contains(_ key: FDB.Bytes) -> Bool {
+        self.subspace.contains(key)
     }
 }
 

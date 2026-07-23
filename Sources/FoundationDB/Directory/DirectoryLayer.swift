@@ -463,7 +463,7 @@ public final class DirectoryLayer: Sendable {
 
         // Return DirectorySubspace with new path
         return DirectorySubspace(
-            subspace: Subspace(prefix: Array(oldNode.prefix)),
+            prefix: oldNode.prefix,
             path: newPath,  // Use original requested newPath
             type: oldNode.type
         )
@@ -805,7 +805,7 @@ public final class DirectoryLayer: Sendable {
             // For partitions, absolutePrefix becomes the partition's contentSubspace
             let partitionLayer = try createPartitionLayer(prefix: absolutePrefix)
             return DirectorySubspace(
-                subspace: partitionLayer.contentSubspace,
+                prefix: partitionLayer.contentSubspace.prefix,
                 path: path,
                 type: type
             )
@@ -813,7 +813,7 @@ public final class DirectoryLayer: Sendable {
 
         // Normal directory - return with ABSOLUTE prefix
         return DirectorySubspace(
-            subspace: Subspace(prefix: Array(absolutePrefix)),
+            prefix: absolutePrefix,
             path: path,
             type: type
         )

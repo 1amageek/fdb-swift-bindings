@@ -22,7 +22,7 @@ try await database.withTransaction { transaction in
     // Set a value
     let key = "hello"
     let value = "world"
-    transaction.setValue([UInt8](value.utf8), for: [UInt8](key.utf8))
+    try transaction.setValue([UInt8](value.utf8), for: [UInt8](key.utf8))
 
     // Get a value
     if let valueBytes = try await transaction.getValue(for: [UInt8](key.utf8)) {
@@ -30,7 +30,7 @@ try await database.withTransaction { transaction in
     }
 
     // Delete a key
-    transaction.clear(key: [UInt8](key.utf8))
+    try transaction.clear(key: [UInt8](key.utf8))
 }
 ```
 
@@ -39,8 +39,8 @@ try await database.withTransaction { transaction in
 ```swift
 // Efficient streaming over large result sets
 let sequence = transaction.getRange(
-    beginSelector: .firstGreaterOrEqual([UInt8]("user:".utf8)),
-    endSelector: .firstGreaterOrEqual([UInt8]("user;".utf8))
+    from: .firstGreaterOrEqual([UInt8]("user:".utf8)),
+    to: .firstGreaterOrEqual([UInt8]("user;".utf8))
 )
 
 for try await (key, value) in sequence {
@@ -57,7 +57,11 @@ try await database.withTransaction { transaction in
     // Atomic increment
     let counterKey = "counter"
     let increment = withUnsafeBytes(of: Int64(1).littleEndian) { Array($0) }
-    transaction.atomicOp(key: [UInt8](counterKey.utf8), param: increment, mutationType: .add)
+    try transaction.atomicOp(
+        key: [UInt8](counterKey.utf8),
+        param: increment,
+        mutationType: .add
+    )
 }
 ```
 

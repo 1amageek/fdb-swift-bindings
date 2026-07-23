@@ -40,9 +40,6 @@ public final class HighContentionAllocator: Sendable {
 
     // MARK: - Properties
 
-    /// Database instance
-    nonisolated(unsafe) private let database: any DatabaseProtocol
-
     /// Counters subspace for tracking allocation counts
     private let counters: Subspace
 
@@ -74,10 +71,8 @@ public final class HighContentionAllocator: Sendable {
     /// Initialize High Contention Allocator
     ///
     /// - Parameters:
-    ///   - database: Database instance
     ///   - subspace: Root subspace for HCA (typically nodeSubspace["hca"])
-    public init(database: any DatabaseProtocol, subspace: Subspace) {
-        self.database = database
+    public init(subspace: Subspace) {
         self.counters = subspace.subspace(0)
         self.recent = subspace.subspace(1)
     }
@@ -106,7 +101,7 @@ public final class HighContentionAllocator: Sendable {
             while true {
                 // Increment counter for current window
                 let counterKey = counters.pack(Tuple(start))
-                transaction.atomicOp(
+                try transaction.atomicOp(
                     key: Array(counterKey),
                     param: littleEndianInt64(1),
                     mutationType: .add
@@ -114,7 +109,7 @@ public final class HighContentionAllocator: Sendable {
 
                 // Read current count
                 let countData = try await transaction.getValue(for: Array(counterKey), snapshot: false)
-                let count = countData.map { decodeInt64($0) } ?? 1
+                let count = try countData.map { try decodeInt64($0) } ?? 1
 
                 // Check if window is less than half full
                 if count * 2 < window {
@@ -128,12 +123,12 @@ public final class HighContentionAllocator: Sendable {
                     let oldCountersBegin = counters.pack(Tuple(start))
                     let oldCountersEnd = counters.pack(Tuple(start + 1))
                     try transaction.setNextWriteNoWriteConflictRange()
-                    transaction.clearRange(beginKey: Array(oldCountersBegin), endKey: Array(oldCountersEnd))
+                    try transaction.clearRange(beginKey: Array(oldCountersBegin), endKey: Array(oldCountersEnd))
 
                     let oldRecentBegin = recent.pack(Tuple(start))
                     let oldRecentEnd = recent.pack(Tuple(start + window))
                     try transaction.setNextWriteNoWriteConflictRange()
-                    transaction.clearRange(beginKey: Array(oldRecentBegin), endKey: Array(oldRecentEnd))
+                    try transaction.clearRange(beginKey: Array(oldRecentBegin), endKey: Array(oldRecentEnd))
                 }
 
                 start += window
@@ -151,7 +146,7 @@ public final class HighContentionAllocator: Sendable {
                 // Candidate is available
                 // Mark as used without write conflict detection, then add explicit conflict
                 try transaction.setNextWriteNoWriteConflictRange()
-                transaction.setValue([0x01], for: Array(candidateKey))
+                try transaction.setValue([0x01], for: Array(candidateKey))
                 try transaction.addWriteConflictKey(Array(candidateKey))
 
                 // Return packed candidate as prefix
@@ -203,8 +198,8 @@ public final class HighContentionAllocator: Sendable {
         // Get last key in counters subspace using lastLessThan selector
         // Use snapshot read to avoid read conflicts
         let sequence = transaction.getRange(
-            beginSelector: .lastLessThan(end),
-            endSelector: .firstGreaterOrEqual(end),
+            from: .lastLessThan(end),
+            to: .firstGreaterOrEqual(end),
             snapshot: true
         )
 
@@ -234,8 +229,16 @@ public final class HighContentionAllocator: Sendable {
     }
 
     /// Decode Int64 from little-endian bytes
-    private func decodeInt64(_ bytes: FDB.Bytes) -> Int64 {
-        guard bytes.count == 8 else { return 0 }
-        return bytes.withUnsafeBytes { $0.load(as: Int64.self).littleEndian }
+    private func decodeInt64<Source: FDB.ByteInput>(
+        _ bytes: Source
+    ) throws -> Int64 {
+        try bytes.withUnsafeBytes { bytes in
+            guard bytes.count == 8 else {
+                throw DirectoryError.invalidMetadata(
+                    reason: "High-contention counter must contain exactly 8 bytes"
+                )
+            }
+            return bytes.loadUnaligned(as: Int64.self).littleEndian
+        }
     }
 }

@@ -22,19 +22,41 @@ import Testing
 
 @testable import FoundationDB
 
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
 extension FDBClient {
     static func maybeInitialize() async throws {
-        if isInitialized {
-            return
-        }
+        try await foundationDBTestRuntime.initializeIfNeeded()
+    }
 
-        try await initialize()
+    static var testClusterFilePath: String? {
+        guard let path = getenv("FDB_CLUSTER_FILE") else {
+            return nil
+        }
+        return String(cString: path)
+    }
+
+    static func openTestDatabase() throws -> FDBDatabase {
+        try openDatabase(clusterFilePath: testClusterFilePath)
+    }
+}
+
+private let foundationDBTestRuntime = FoundationDBTestRuntime()
+
+private actor FoundationDBTestRuntime {
+    func initializeIfNeeded() async throws {
+        guard !FDBClient.isInitialized else { return }
+        try await FDBClient.initialize()
     }
 }
 
 // Helper extension for Foundation-free string operations
 extension String {
-    init(bytes: [UInt8]) {
+    init<Bytes: Collection>(bytes: Bytes) where Bytes.Element == UInt8 {
         self = String(decoding: bytes, as: UTF8.self)
     }
 
@@ -48,24 +70,27 @@ extension String {
 extension TransactionProtocol {
     func getValue(for key: String, snapshot: Bool = false) async throws -> FDB.Bytes? {
         let keyBytes = [UInt8](key.utf8)
-        return try await getValue(for: keyBytes, snapshot: snapshot)
+        return try await getValue(
+            for: keyBytes,
+            snapshot: snapshot
+        )?.copyBytes()
     }
 
-    func setValue(_ value: String, for key: String) {
+    func setValue(_ value: String, for key: String) throws {
         let keyBytes = [UInt8](key.utf8)
         let valueBytes = [UInt8](value.utf8)
-        setValue(valueBytes, for: keyBytes)
+        try setValue(valueBytes, for: keyBytes)
     }
 
-    func clear(key: String) {
+    func clear(key: String) throws {
         let keyBytes = [UInt8](key.utf8)
-        clear(key: keyBytes)
+        try clear(key: keyBytes)
     }
 
-    func clearRange(beginKey: String, endKey: String) {
+    func clearRange(beginKey: String, endKey: String) throws {
         let beginKeyBytes = [UInt8](beginKey.utf8)
         let endKeyBytes = [UInt8](endKey.utf8)
-        clearRange(beginKey: beginKeyBytes, endKey: endKeyBytes)
+        try clearRange(beginKey: beginKeyBytes, endKey: endKeyBytes)
     }
 
     func getRange(
@@ -74,17 +99,23 @@ extension TransactionProtocol {
         let beginSelector = FDB.KeySelector.firstGreaterOrEqual(beginKey)
         let endSelector = FDB.KeySelector.firstGreaterOrEqual(endKey)
         return getRange(
-            beginSelector: beginSelector, endSelector: endSelector, snapshot: snapshot
+            from: beginSelector, to: endSelector, snapshot: snapshot
         )
     }
 
-    func getRangeNative(
-        beginKey: String, endKey: String, limit: Int = 0, snapshot: Bool = false
-    ) async throws -> ResultRange {
+    func readRangeBatch(
+        from beginKey: String,
+        to endKey: String,
+        limit: Int = 0,
+        snapshot: Bool = false
+    ) async throws -> RangeBatch {
         let beginKeyBytes = [UInt8](beginKey.utf8)
         let endKeyBytes = [UInt8](endKey.utf8)
-        return try await getRangeNative(
-            beginKey: beginKeyBytes, endKey: endKeyBytes, limit: limit, snapshot: snapshot
+        return try await readRangeBatch(
+            from: beginKeyBytes,
+            to: endKeyBytes,
+            limit: limit,
+            snapshot: snapshot
         )
     }
 }
@@ -110,18 +141,18 @@ extension FDB.KeySelector {
 @Test("getValue test")
 func testGetValue() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     let res1 = try await newTransaction.getValue(for: "test_nonexistent_key")
     #expect(res1 == nil, "Non-existent key should return nil")
 
-    newTransaction.setValue("world", for: "test_hello")
+    try newTransaction.setValue("world", for: "test_hello")
     let res2 = try await newTransaction.getValue(for: "test_hello")
     #expect(res2 == Array("world".utf8))
 }
@@ -129,37 +160,40 @@ func testGetValue() async throws {
 @Test("setValue with byte arrays")
 func setValueBytes() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     let key: FDB.Bytes = [UInt8]("test_byte_key".utf8)
     let value: FDB.Bytes = [UInt8]("test_byte_value".utf8)
 
-    newTransaction.setValue(value, for: key)
+    try newTransaction.setValue(value, for: key)
 
     let retrievedValue = try await newTransaction.getValue(for: key)
-    #expect(retrievedValue == value, "Retrieved value should match set value")
+    #expect(
+        retrievedValue?.copyBytes() == value,
+        "Retrieved value should match set value"
+    )
 }
 
 @Test("setValue with strings")
 func setValueStrings() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     let key = "test_string_key"
     let value = "test_string_value"
-    newTransaction.setValue(value, for: key)
+    try newTransaction.setValue(value, for: key)
 
     let retrievedValue = try await newTransaction.getValue(for: key)
     let expectedValue = [UInt8](value.utf8)
@@ -169,22 +203,25 @@ func setValueStrings() async throws {
 @Test("clear with byte arrays")
 func clearBytes() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     let key: FDB.Bytes = [UInt8]("test_clear_key".utf8)
     let value: FDB.Bytes = [UInt8]("test_clear_value".utf8)
 
-    newTransaction.setValue(value, for: key)
+    try newTransaction.setValue(value, for: key)
     let retrievedValueBefore = try await newTransaction.getValue(for: key)
-    #expect(retrievedValueBefore == value, "Value should exist before clear")
+    #expect(
+        retrievedValueBefore?.copyBytes() == value,
+        "Value should exist before clear"
+    )
 
-    newTransaction.clear(key: key)
+    try newTransaction.clear(key: key)
     let retrievedValueAfter = try await newTransaction.getValue(for: key)
     #expect(retrievedValueAfter == nil, "Value should be nil after clear")
 }
@@ -192,23 +229,23 @@ func clearBytes() async throws {
 @Test("clear with strings")
 func clearStrings() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     let key = "test_clear_string_key"
     let value = "test_clear_string_value"
 
-    newTransaction.setValue(value, for: key)
+    try newTransaction.setValue(value, for: key)
     let retrievedValueBefore = try await newTransaction.getValue(for: key)
     let expectedValue = [UInt8](value.utf8)
     #expect(retrievedValueBefore == expectedValue, "Value should exist before clear")
 
-    newTransaction.clear(key: key)
+    try newTransaction.clear(key: key)
     let retrievedValueAfter = try await newTransaction.getValue(for: key)
     #expect(retrievedValueAfter == nil, "Value should be nil after clear")
 }
@@ -216,11 +253,11 @@ func clearStrings() async throws {
 @Test("clearRange with byte arrays")
 func clearRangeBytes() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -232,35 +269,38 @@ func clearRangeBytes() async throws {
     let beginKey: FDB.Bytes = [UInt8]("test_range_key_a".utf8)
     let endKey: FDB.Bytes = [UInt8]("test_range_key_c".utf8)
 
-    newTransaction.setValue(value, for: key1)
-    newTransaction.setValue(value, for: key2)
-    newTransaction.setValue(value, for: key3)
+    try newTransaction.setValue(value, for: key1)
+    try newTransaction.setValue(value, for: key2)
+    try newTransaction.setValue(value, for: key3)
 
     let value1Before = try await newTransaction.getValue(for: key1)
     let value2Before = try await newTransaction.getValue(for: key2)
     let value3Before = try await newTransaction.getValue(for: key3)
-    #expect(value1Before == value, "Value1 should exist before clearRange")
-    #expect(value2Before == value, "Value2 should exist before clearRange")
-    #expect(value3Before == value, "Value3 should exist before clearRange")
+    #expect(value1Before?.copyBytes() == value, "Value1 should exist before clearRange")
+    #expect(value2Before?.copyBytes() == value, "Value2 should exist before clearRange")
+    #expect(value3Before?.copyBytes() == value, "Value3 should exist before clearRange")
 
-    newTransaction.clearRange(beginKey: beginKey, endKey: endKey)
+    try newTransaction.clearRange(beginKey: beginKey, endKey: endKey)
 
     let value1After = try await newTransaction.getValue(for: key1)
     let value2After = try await newTransaction.getValue(for: key2)
     let value3After = try await newTransaction.getValue(for: key3)
     #expect(value1After == nil, "Value1 should be nil after clearRange")
     #expect(value2After == nil, "Value2 should be nil after clearRange")
-    #expect(value3After == value, "Value3 should still exist (end key is exclusive)")
+    #expect(
+        value3After?.copyBytes() == value,
+        "Value3 should still exist (end key is exclusive)"
+    )
 }
 
 @Test("clearRange with strings")
 func clearRangeStrings() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -272,9 +312,9 @@ func clearRangeStrings() async throws {
     let beginKey = "test_range_string_key_a"
     let endKey = "test_range_string_key_c"
 
-    newTransaction.setValue(value, for: key1)
-    newTransaction.setValue(value, for: key2)
-    newTransaction.setValue(value, for: key3)
+    try newTransaction.setValue(value, for: key1)
+    try newTransaction.setValue(value, for: key2)
+    try newTransaction.setValue(value, for: key3)
 
     let expectedValue = [UInt8](value.utf8)
     let value1Before = try await newTransaction.getValue(for: key1)
@@ -284,7 +324,7 @@ func clearRangeStrings() async throws {
     #expect(value2Before == expectedValue, "Value2 should exist before clearRange")
     #expect(value3Before == expectedValue, "Value3 should exist before clearRange")
 
-    newTransaction.clearRange(beginKey: beginKey, endKey: endKey)
+    try newTransaction.clearRange(beginKey: beginKey, endKey: endKey)
 
     let value1After = try await newTransaction.getValue(for: key1)
     let value2After = try await newTransaction.getValue(for: key2)
@@ -297,18 +337,18 @@ func clearRangeStrings() async throws {
 @Test("getKey with KeySelector")
 func getKeyWithKeySelector() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     // Set up some test data
-    newTransaction.setValue("value1", for: "test_getkey_a")
-    newTransaction.setValue("value2", for: "test_getkey_b")
-    newTransaction.setValue("value3", for: "test_getkey_c")
+    try newTransaction.setValue("value1", for: "test_getkey_a")
+    try newTransaction.setValue("value2", for: "test_getkey_b")
+    try newTransaction.setValue("value3", for: "test_getkey_c")
     _ = try await newTransaction.commit()
 
     let readTransaction = try database.createTransaction()
@@ -316,23 +356,26 @@ func getKeyWithKeySelector() async throws {
     let selector = FDB.KeySelector.firstGreaterOrEqual("test_getkey_b")
     let resultKey = try await readTransaction.getKey(selector: selector)
     let expectedKey = [UInt8]("test_getkey_b".utf8)
-    #expect(resultKey == expectedKey, "getKey with KeySelector should find exact key")
+    #expect(
+        resultKey?.copyBytes() == expectedKey,
+        "getKey with KeySelector should find exact key"
+    )
 }
 
 @Test("getKey with different KeySelector methods")
 func getKeyWithDifferentSelectors() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
-    newTransaction.setValue("value1", for: "test_selector_a")
-    newTransaction.setValue("value2", for: "test_selector_b")
-    newTransaction.setValue("value3", for: "test_selector_c")
+    try newTransaction.setValue("value1", for: "test_selector_a")
+    try newTransaction.setValue("value2", for: "test_selector_b")
+    try newTransaction.setValue("value3", for: "test_selector_c")
     _ = try await newTransaction.commit()
 
     let readTransaction = try database.createTransaction()
@@ -341,65 +384,75 @@ func getKeyWithDifferentSelectors() async throws {
     let selectorGTE = FDB.KeySelector.firstGreaterOrEqual("test_selector_b")
     let resultGTE = try await readTransaction.getKey(selector: selectorGTE)
     #expect(
-        resultGTE == [UInt8]("test_selector_b".utf8), "firstGreaterOrEqual should find exact key"
+        resultGTE?.copyBytes() == [UInt8]("test_selector_b".utf8),
+        "firstGreaterOrEqual should find exact key"
     )
 
     // Test firstGreaterThan
     let selectorGT = FDB.KeySelector.firstGreaterThan("test_selector_b")
     let resultGT = try await readTransaction.getKey(selector: selectorGT)
-    #expect(resultGT == [UInt8]("test_selector_c".utf8), "firstGreaterThan should find next key")
+    #expect(
+        resultGT?.copyBytes() == [UInt8]("test_selector_c".utf8),
+        "firstGreaterThan should find next key"
+    )
 
     // Test lastLessOrEqual
     let selectorLTE = FDB.KeySelector.lastLessOrEqual("test_selector_b")
     let resultLTE = try await readTransaction.getKey(selector: selectorLTE)
-    #expect(resultLTE == [UInt8]("test_selector_b".utf8), "lastLessOrEqual should find exact key")
+    #expect(
+        resultLTE?.copyBytes() == [UInt8]("test_selector_b".utf8),
+        "lastLessOrEqual should find exact key"
+    )
 
     // Test lastLessThan
     let selectorLT = FDB.KeySelector.lastLessThan("test_selector_b")
     let resultLT = try await readTransaction.getKey(selector: selectorLT)
-    #expect(resultLT == [UInt8]("test_selector_a".utf8), "lastLessThan should find previous key")
+    #expect(
+        resultLT?.copyBytes() == [UInt8]("test_selector_a".utf8),
+        "lastLessThan should find previous key"
+    )
 }
 
 @Test("getKey with Selectable protocol")
 func getKeyWithSelectable() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     let key: FDB.Bytes = [UInt8]("test_selectable_key".utf8)
     let value: FDB.Bytes = [UInt8]("test_selectable_value".utf8)
-    newTransaction.setValue(value, for: key)
+    try newTransaction.setValue(value, for: key)
     _ = try await newTransaction.commit()
 
     let readTransaction = try database.createTransaction()
 
     // Test with FDB.Bytes (which implements Selectable)
     let resultWithKey = try await readTransaction.getKey(selector: key)
-    #expect(resultWithKey == key, "getKey with FDB.Bytes should work")
+    #expect(resultWithKey?.copyBytes() == key, "getKey with FDB.Bytes should work")
 
     // Test with String (which implements Selectable)
     let stringKey = "test_selectable_key"
     let resultWithString = try await readTransaction.getKey(selector: stringKey)
-    #expect(resultWithString == key, "getKey with String should work")
+    #expect(resultWithString?.copyBytes() == key, "getKey with String should work")
 }
 
 @Test("commit transaction")
 func testCommit() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
-    newTransaction.setValue("test_commit_value", for: "test_commit_key")
+    try newTransaction.setValue("test_commit_value", for: "test_commit_key")
     let commitResult = try await newTransaction.commit()
     #expect(commitResult == true, "Commit should return true on success")
 
@@ -415,7 +468,7 @@ func testCommit() async throws {
 // @Test("getVersionstamp")
 // func testGetVersionstamp() async throws {
 //     try await FDBClient.maybeInitialize()
-//     let database = try FDBClient.openDatabase()
+//     let database = try FDBClient.openTestDatabase()
 //     let transaction = try database.createTransaction()
 
 //     // Clear test key range
@@ -432,15 +485,15 @@ func testCommit() async throws {
 @Test("cancel transaction")
 func testCancel() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
-    newTransaction.setValue("test_cancel_value", for: "test_cancel_key")
+    try newTransaction.setValue("test_cancel_value", for: "test_cancel_key")
     newTransaction.cancel()
 
     // After canceling, operations should fail
@@ -456,11 +509,11 @@ func testCancel() async throws {
 @Test("setReadVersion and getReadVersion")
 func readVersion() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -473,11 +526,11 @@ func readVersion() async throws {
 @Test("read version with snapshot read")
 func readVersionSnapshot() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -486,7 +539,7 @@ func readVersionSnapshot() async throws {
     newTransaction.setReadVersion(testVersion)
 
     // Test snapshot read with the version
-    newTransaction.setValue("rangetest_snapshot_value", for: "rangetest_snapshot_key")
+    try newTransaction.setValue("rangetest_snapshot_value", for: "rangetest_snapshot_key")
     let value = try await newTransaction.getValue(for: "rangetest_snapshot_key", snapshot: true)
     #expect(value != nil, "Snapshot read should work with set read version")
 }
@@ -494,11 +547,11 @@ func readVersionSnapshot() async throws {
 @Test("getRange with byte arrays")
 func getRangeBytes() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -510,18 +563,23 @@ func getRangeBytes() async throws {
     let value2: FDB.Bytes = [UInt8]("byte_value2".utf8)
     let value3: FDB.Bytes = [UInt8]("byte_value3".utf8)
 
-    newTransaction.setValue(value1, for: key1)
-    newTransaction.setValue(value2, for: key2)
-    newTransaction.setValue(value3, for: key3)
+    try newTransaction.setValue(value1, for: key1)
+    try newTransaction.setValue(value2, for: key2)
+    try newTransaction.setValue(value3, for: key3)
     _ = try await newTransaction.commit()
 
     // Test range query with byte arrays
     let readTransaction = try database.createTransaction()
     let beginKey: FDB.Bytes = [UInt8]("test_byte_range_001".utf8)
     let endKey: FDB.Bytes = [UInt8]("test_byte_range_003".utf8)
-    let result = try await readTransaction.getRangeNative(beginKey: beginKey, endKey: endKey, limit: 0, snapshot: false)
+    let result = try await readTransaction.readRangeBatch(
+        from: beginKey,
+        to: endKey,
+        limit: 0,
+        snapshot: false
+    )
 
-    #expect(!result.more)
+    #expect(!result.hasMore)
     try #require(
         result.records.count == 2, "Should return 2 key-value pairs (end key is exclusive)"
     )
@@ -537,11 +595,11 @@ func getRangeBytes() async throws {
 @Test("getRange with limit")
 func getRangeWithLimit() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -549,14 +607,17 @@ func getRangeWithLimit() async throws {
     for i in 1 ... 10 {
         let key = "test_limit_key_" + String.padded(i)
         let value = "limit_value\(i)"
-        newTransaction.setValue(value, for: key)
+        try newTransaction.setValue(value, for: key)
     }
     _ = try await newTransaction.commit()
 
     // Test with limit
     let readTransaction = try database.createTransaction()
-    let result = try await readTransaction.getRangeNative(
-        beginKey: "test_limit_key_001", endKey: "test_limit_key_999", limit: 3, snapshot: false
+    let result = try await readTransaction.readRangeBatch(
+        from: "test_limit_key_001",
+        to: "test_limit_key_999",
+        limit: 3,
+        snapshot: false
     )
     #expect(result.records.count == 3, "Should return exactly 3 key-value pairs due to limit")
 
@@ -580,32 +641,32 @@ func getRangeWithLimit() async throws {
 @Test("getRange empty range")
 func getRangeEmpty() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     // Test empty range
-    let result = try await newTransaction.getRangeNative(
-        beginKey: "test_empty_start", endKey: "test_empty_end"
+    let result = try await newTransaction.readRangeBatch(
+        from: "test_empty_start", to: "test_empty_end"
     )
 
     #expect(result.records.count == 0, "Empty range should return no results")
     #expect(result.records.isEmpty, "Results should be empty")
-    #expect(result.more == false, "Should indicate no more results")
+    #expect(result.hasMore == false, "Should indicate no more results")
 }
 
-@Test("getRangeNative with KeySelectors - firstGreaterOrEqual")
-func getRangeNativeWithKeySelectors() async throws {
+@Test("readRangeBatch with KeySelectors - firstGreaterOrEqual")
+func readRangeBatchWithKeySelectors() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -617,20 +678,27 @@ func getRangeNativeWithKeySelectors() async throws {
     let value2: FDB.Bytes = [UInt8]("selector_value2".utf8)
     let value3: FDB.Bytes = [UInt8]("selector_value3".utf8)
 
-    newTransaction.setValue(value1, for: key1)
-    newTransaction.setValue(value2, for: key2)
-    newTransaction.setValue(value3, for: key3)
+    try newTransaction.setValue(value1, for: key1)
+    try newTransaction.setValue(value2, for: key2)
+    try newTransaction.setValue(value3, for: key3)
     _ = try await newTransaction.commit()
 
     // Test with KeySelectors using firstGreaterOrEqual
     let readTransaction = try database.createTransaction()
     let beginSelector = FDB.KeySelector.firstGreaterOrEqual(key1)
     let endSelector = FDB.KeySelector.firstGreaterOrEqual(key3)
-    let result = try await readTransaction.getRangeNative(
-        beginSelector: beginSelector, endSelector: endSelector
+    let result = try await readTransaction.readRangeBatch(
+        from: beginSelector,
+        to: endSelector,
+        limit: 0,
+        targetBytes: 0,
+        streamingMode: .iterator,
+        iteration: 1,
+        reverse: false,
+        snapshot: false
     )
 
-    #expect(!result.more)
+    #expect(!result.hasMore)
     try #require(
         result.records.count == 2, "Should return 2 key-value pairs (end selector is exclusive)"
     )
@@ -646,29 +714,36 @@ func getRangeNativeWithKeySelectors() async throws {
 @Test("getRange with KeySelectors - String keys")
 func getRangeWithStringSelectorKeys() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     // Set up test data with string keys
-    newTransaction.setValue("str_value1", for: "test_str_selector_001")
-    newTransaction.setValue("str_value2", for: "test_str_selector_002")
-    newTransaction.setValue("str_value3", for: "test_str_selector_003")
+    try newTransaction.setValue("str_value1", for: "test_str_selector_001")
+    try newTransaction.setValue("str_value2", for: "test_str_selector_002")
+    try newTransaction.setValue("str_value3", for: "test_str_selector_003")
     _ = try await newTransaction.commit()
 
     // Test with String-based KeySelectors
     let readTransaction = try database.createTransaction()
     let beginSelector = FDB.KeySelector.firstGreaterOrEqual("test_str_selector_001")
     let endSelector = FDB.KeySelector.firstGreaterOrEqual("test_str_selector_003")
-    let result = try await readTransaction.getRangeNative(
-        beginSelector: beginSelector, endSelector: endSelector
+    let result = try await readTransaction.readRangeBatch(
+        from: beginSelector,
+        to: endSelector,
+        limit: 0,
+        targetBytes: 0,
+        streamingMode: .iterator,
+        iteration: 1,
+        reverse: false,
+        snapshot: false
     )
 
-    #expect(!result.more)
+    #expect(!result.hasMore)
     try #require(result.records.count == 2, "Should return 2 key-value pairs")
 
     // Convert back to strings for easier testing
@@ -683,27 +758,32 @@ func getRangeWithStringSelectorKeys() async throws {
 @Test("getRange with Selectable protocol - mixed types")
 func getRangeWithSelectable() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     // Set up test data
-    newTransaction.setValue("mixed_value1", for: "test_mixed_001")
-    newTransaction.setValue("mixed_value2", for: "test_mixed_002")
-    newTransaction.setValue("mixed_value3", for: "test_mixed_003")
+    try newTransaction.setValue("mixed_value1", for: "test_mixed_001")
+    try newTransaction.setValue("mixed_value2", for: "test_mixed_002")
+    try newTransaction.setValue("mixed_value3", for: "test_mixed_003")
     _ = try await newTransaction.commit()
 
     // Test using the general Selectable protocol with mixed key types
     let readTransaction = try database.createTransaction()
     let beginKey: FDB.Bytes = [UInt8]("test_mixed_001".utf8)
     let endKey = [UInt8]("test_mixed_003".utf8)
-    let result = try await readTransaction.getRangeNative(beginKey: beginKey, endKey: endKey, limit: 0, snapshot: false)
+    let result = try await readTransaction.readRangeBatch(
+        from: beginKey,
+        to: endKey,
+        limit: 0,
+        snapshot: false
+    )
 
-    #expect(!result.more)
+    #expect(!result.hasMore)
     try #require(result.records.count == 2, "Should return 2 key-value pairs")
 
     let keys = result.records.map { String(bytes: $0.0) }.sorted()
@@ -714,18 +794,18 @@ func getRangeWithSelectable() async throws {
 @Test("KeySelector static methods with different offsets")
 func keySelectorMethods() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
     // Set up test data
-    newTransaction.setValue("offset_value1", for: "test_offset_001")
-    newTransaction.setValue("offset_value2", for: "test_offset_002")
-    newTransaction.setValue("offset_value3", for: "test_offset_003")
+    try newTransaction.setValue("offset_value1", for: "test_offset_001")
+    try newTransaction.setValue("offset_value2", for: "test_offset_002")
+    try newTransaction.setValue("offset_value3", for: "test_offset_003")
     _ = try await newTransaction.commit()
 
     let readTransaction = try database.createTransaction()
@@ -735,11 +815,25 @@ func keySelectorMethods() async throws {
     let beginSelectorGT = FDB.KeySelector.firstGreaterThan("test_offset_002")
     let endSelector = FDB.KeySelector.firstGreaterOrEqual("test_offset_999")
 
-    let resultGTE = try await readTransaction.getRangeNative(
-        beginSelector: beginSelectorGTE, endSelector: endSelector
+    let resultGTE = try await readTransaction.readRangeBatch(
+        from: beginSelectorGTE,
+        to: endSelector,
+        limit: 0,
+        targetBytes: 0,
+        streamingMode: .iterator,
+        iteration: 1,
+        reverse: false,
+        snapshot: false
     )
-    let resultGT = try await readTransaction.getRangeNative(
-        beginSelector: beginSelectorGT, endSelector: endSelector
+    let resultGT = try await readTransaction.readRangeBatch(
+        from: beginSelectorGT,
+        to: endSelector,
+        limit: 0,
+        targetBytes: 0,
+        streamingMode: .iterator,
+        iteration: 1,
+        reverse: false,
+        snapshot: false
     )
 
     // firstGreaterOrEqual should include test_offset_002
@@ -755,16 +849,16 @@ func keySelectorMethods() async throws {
 @Test("withTransaction success")
 func withTransactionSuccess() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range first
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
+    try clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await clearTransaction.commit()
 
     // Test successful withTransaction
     let result = try await database.withTransaction { transaction in
-        transaction.setValue("success_value", for: "test_with_transaction_key")
+        try transaction.setValue("success_value", for: "test_with_transaction_key")
         return "operation_completed"
     }
 
@@ -780,18 +874,18 @@ func withTransactionSuccess() async throws {
 @Test("withTransaction with exception in operation")
 func withTransactionException() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range first
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
+    try clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await clearTransaction.commit()
 
     struct TestError: Error {}
 
     do {
         _ = try await database.withTransaction { transaction in
-            transaction.setValue("exception_value", for: "test_with_transaction_exception")
+            try transaction.setValue("exception_value", for: "test_with_transaction_exception")
             throw TestError()
         }
         #expect(Bool(false), "withTransaction should propagate thrown exceptions")
@@ -811,16 +905,16 @@ func withTransactionException() async throws {
 @Test("withTransaction with non-retryable error")
 func withTransactionNonRetryableError() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range first
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
+    try clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await clearTransaction.commit()
 
     do {
         _ = try await database.withTransaction { transaction in
-            transaction.setValue("non_retryable_value", for: "test_with_transaction_non_retryable")
+            try transaction.setValue("non_retryable_value", for: "test_with_transaction_non_retryable")
             // Throw a non-retryable FDB error (transaction_cancelled)
             throw FDBError(.transactionCancelled)
         }
@@ -830,7 +924,7 @@ func withTransactionNonRetryableError() async throws {
             error.code == FDBErrorCode.transactionCancelled.rawValue,
             "Should propagate the exact FDBError"
         )
-        #expect(!error.isRetryable, "Error should be non-retryable")
+        #expect(error.retryDisposition == .never)
     } catch {
         #expect(Bool(false), "Should catch FDBError, got \(error)")
     }
@@ -839,22 +933,22 @@ func withTransactionNonRetryableError() async throws {
 @Test("withTransaction returns value from operation")
 func withTransactionReturnValue() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range first
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
+    try clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await clearTransaction.commit()
 
     // Test that withTransaction returns the correct value
     let stringResult = try await database.withTransaction { transaction in
-        transaction.setValue("return_test_value", for: "test_return_key")
+        try transaction.setValue("return_test_value", for: "test_return_key")
         return "success"
     }
     #expect(stringResult == "success", "Should return string value from operation")
 
     let intResult = try await database.withTransaction { transaction in
-        transaction.setValue("return_test_value2", for: "test_return_key2")
+        try transaction.setValue("return_test_value2", for: "test_return_key2")
         return 42
     }
     #expect(intResult == 42, "Should return integer value from operation")
@@ -869,11 +963,11 @@ func withTransactionReturnValue() async throws {
 @Test("withTransaction Sendable compliance")
 func withTransactionSendable() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range first
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
+    try clearTransaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await clearTransaction.commit()
 
     // Test with Sendable types
@@ -883,7 +977,7 @@ func withTransactionSendable() async throws {
     }
 
     let result = try await database.withTransaction { transaction in
-        transaction.setValue("sendable_value", for: "test_sendable_key")
+        try transaction.setValue("sendable_value", for: "test_sendable_key")
         return SendableData(id: 123, name: "test")
     }
 
@@ -891,46 +985,14 @@ func withTransactionSendable() async throws {
     #expect(result.name == "test", "Should return sendable struct with correct name")
 }
 
-@Test("FDBError isRetryable property")
-func fdbErrorRetryable() {
-    // Test retryable errors
-    let notCommittedError = FDBError(.notCommitted)
-    #expect(notCommittedError.isRetryable, "not_committed should be retryable")
-
-    let transactionTooOldError = FDBError(.transactionTooOld)
-    #expect(transactionTooOldError.isRetryable, "transaction_too_old should be retryable")
-
-    let futureVersionError = FDBError(.futureVersion)
-    #expect(futureVersionError.isRetryable, "future_version should be retryable")
-
-    let transactionTimedOutError = FDBError(.transactionTimedOut)
-    #expect(transactionTimedOutError.isRetryable, "transaction_timed_out should be retryable")
-
-    let processBehindError = FDBError(.processBehind)
-    #expect(processBehindError.isRetryable, "process_behind should be retryable")
-
-    let tagThrottledError = FDBError(.tagThrottled)
-    #expect(tagThrottledError.isRetryable, "tag_throttled should be retryable")
-
-    // Test non-retryable errors
-    let transactionCancelledError = FDBError(.transactionCancelled)
-    #expect(!transactionCancelledError.isRetryable, "transaction_cancelled should not be retryable")
-
-    let unknownError = FDBError(.unknownError)
-    #expect(!unknownError.isRetryable, "unknown error should not be retryable")
-
-    let internalError = FDBError(.internalError)
-    #expect(!internalError.isRetryable, "internal_error should not be retryable")
-}
-
 @Test("atomic operation ADD")
 func atomicOpAdd() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -938,11 +1000,11 @@ func atomicOpAdd() async throws {
 
     // Initial value: little-endian 64-bit integer 10
     let initialValue: FDB.Bytes = withUnsafeBytes(of: Int64(10).littleEndian) { Array($0) }
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // Add 5 using atomic operation
     let addValue: FDB.Bytes = withUnsafeBytes(of: Int64(5).littleEndian) { Array($0) }
-    newTransaction.atomicOp(key: key, param: addValue, mutationType: .add)
+    try newTransaction.atomicOp(key: key, param: addValue, mutationType: .add)
 
     _ = try await newTransaction.commit()
 
@@ -951,18 +1013,18 @@ func atomicOpAdd() async throws {
     let result = try await readTransaction.getValue(for: key)
     try #require(result != nil, "Result should not be nil")
 
-    let resultValue = result!.withUnsafeBytes { $0.load(as: Int64.self) }
+    let resultValue = result!.withUnsafeBytes { $0.loadUnaligned(as: Int64.self) }
     #expect(Int64(littleEndian: resultValue) == 15, "10 + 5 should equal 15")
 }
 
 @Test("atomic operation BIT_AND")
 func atomicOpBitAnd() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -970,11 +1032,11 @@ func atomicOpBitAnd() async throws {
 
     // Initial value: 0xFF (255)
     let initialValue: FDB.Bytes = [0xFF]
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // AND with 0x0F (15)
     let andValue: FDB.Bytes = [0x0F]
-    newTransaction.atomicOp(key: key, param: andValue, mutationType: .bitAnd)
+    try newTransaction.atomicOp(key: key, param: andValue, mutationType: .bitAnd)
 
     _ = try await newTransaction.commit()
 
@@ -989,11 +1051,11 @@ func atomicOpBitAnd() async throws {
 @Test("atomic operation BIT_OR")
 func atomicOpBitOr() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1001,11 +1063,11 @@ func atomicOpBitOr() async throws {
 
     // Initial value: 0x0F (15)
     let initialValue: FDB.Bytes = [0x0F]
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // OR with 0xF0 (240)
     let orValue: FDB.Bytes = [0xF0]
-    newTransaction.atomicOp(key: key, param: orValue, mutationType: .bitOr)
+    try newTransaction.atomicOp(key: key, param: orValue, mutationType: .bitOr)
 
     _ = try await newTransaction.commit()
 
@@ -1020,11 +1082,11 @@ func atomicOpBitOr() async throws {
 @Test("atomic operation BIT_XOR")
 func atomicOpBitXor() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1032,11 +1094,11 @@ func atomicOpBitXor() async throws {
 
     // Initial value: 0xFF (255)
     let initialValue: FDB.Bytes = [0xFF]
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // XOR with 0x0F (15)
     let xorValue: FDB.Bytes = [0x0F]
-    newTransaction.atomicOp(key: key, param: xorValue, mutationType: .bitXor)
+    try newTransaction.atomicOp(key: key, param: xorValue, mutationType: .bitXor)
 
     _ = try await newTransaction.commit()
 
@@ -1051,11 +1113,11 @@ func atomicOpBitXor() async throws {
 @Test("atomic operation MAX")
 func atomicOpMax() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1063,11 +1125,11 @@ func atomicOpMax() async throws {
 
     // Initial value: little-endian 64-bit integer 10
     let initialValue: FDB.Bytes = withUnsafeBytes(of: Int64(10).littleEndian) { Array($0) }
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // Max with 15
     let maxValue: FDB.Bytes = withUnsafeBytes(of: Int64(15).littleEndian) { Array($0) }
-    newTransaction.atomicOp(key: key, param: maxValue, mutationType: .max)
+    try newTransaction.atomicOp(key: key, param: maxValue, mutationType: .max)
 
     _ = try await newTransaction.commit()
 
@@ -1076,18 +1138,18 @@ func atomicOpMax() async throws {
     let result = try await readTransaction.getValue(for: key)
     try #require(result != nil, "Result should not be nil")
 
-    let resultValue = result!.withUnsafeBytes { $0.load(as: Int64.self) }
+    let resultValue = result!.withUnsafeBytes { $0.loadUnaligned(as: Int64.self) }
     #expect(Int64(littleEndian: resultValue) == 15, "max(10, 15) should equal 15")
 }
 
 @Test("atomic operation MIN")
 func atomicOpMin() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1095,11 +1157,11 @@ func atomicOpMin() async throws {
 
     // Initial value: little-endian 64-bit integer 10
     let initialValue: FDB.Bytes = withUnsafeBytes(of: Int64(10).littleEndian) { Array($0) }
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // Min with 5
     let minValue: FDB.Bytes = withUnsafeBytes(of: Int64(5).littleEndian) { Array($0) }
-    newTransaction.atomicOp(key: key, param: minValue, mutationType: .min)
+    try newTransaction.atomicOp(key: key, param: minValue, mutationType: .min)
 
     _ = try await newTransaction.commit()
 
@@ -1108,18 +1170,18 @@ func atomicOpMin() async throws {
     let result = try await readTransaction.getValue(for: key)
     try #require(result != nil, "Result should not be nil")
 
-    let resultValue = result!.withUnsafeBytes { $0.load(as: Int64.self) }
+    let resultValue = result!.withUnsafeBytes { $0.loadUnaligned(as: Int64.self) }
     #expect(Int64(littleEndian: resultValue) == 5, "min(10, 5) should equal 5")
 }
 
 @Test("atomic operation APPEND_IF_FITS")
 func atomicOpAppendIfFits() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1127,11 +1189,11 @@ func atomicOpAppendIfFits() async throws {
 
     // Initial value: "Hello"
     let initialValue: FDB.Bytes = [UInt8]("Hello".utf8)
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // Append " World"
     let appendValue: FDB.Bytes = [UInt8](" World".utf8)
-    newTransaction.atomicOp(key: key, param: appendValue, mutationType: .appendIfFits)
+    try newTransaction.atomicOp(key: key, param: appendValue, mutationType: .appendIfFits)
 
     _ = try await newTransaction.commit()
 
@@ -1147,11 +1209,11 @@ func atomicOpAppendIfFits() async throws {
 @Test("atomic operation BYTE_MIN")
 func atomicOpByteMin() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1159,11 +1221,11 @@ func atomicOpByteMin() async throws {
 
     // Initial value: "zebra"
     let initialValue: FDB.Bytes = [UInt8]("zebra".utf8)
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // Compare with "apple" (lexicographically smaller)
     let compareValue: FDB.Bytes = [UInt8]("apple".utf8)
-    newTransaction.atomicOp(key: key, param: compareValue, mutationType: .byteMin)
+    try newTransaction.atomicOp(key: key, param: compareValue, mutationType: .byteMin)
 
     _ = try await newTransaction.commit()
 
@@ -1179,11 +1241,11 @@ func atomicOpByteMin() async throws {
 @Test("atomic operation BYTE_MAX")
 func atomicOpByteMax() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1191,11 +1253,11 @@ func atomicOpByteMax() async throws {
 
     // Initial value: "apple"
     let initialValue: FDB.Bytes = [UInt8]("apple".utf8)
-    newTransaction.setValue(initialValue, for: key)
+    try newTransaction.setValue(initialValue, for: key)
 
     // Compare with "zebra" (lexicographically larger)
     let compareValue: FDB.Bytes = [UInt8]("zebra".utf8)
-    newTransaction.atomicOp(key: key, param: compareValue, mutationType: .byteMax)
+    try newTransaction.atomicOp(key: key, param: compareValue, mutationType: .byteMax)
 
     _ = try await newTransaction.commit()
 
@@ -1254,11 +1316,11 @@ func networkOptionConvenienceMethods() throws {
 @Test("transaction option with timeout enforcement")
 func transactionTimeoutOption() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1269,7 +1331,7 @@ func transactionTimeoutOption() async throws {
     // This should timeout very quickly
     do {
         // Perform an operation that might take longer than 1ms
-        newTransaction.setValue("timeout_test_value", for: "test_timeout_key")
+        try newTransaction.setValue("timeout_test_value", for: "test_timeout_key")
         _ = try await newTransaction.commit()
 
         // If we get here, either the operation was very fast or timeout didn't work as expected
@@ -1283,11 +1345,11 @@ func transactionTimeoutOption() async throws {
 @Test("transaction option with size limit")
 func transactionSizeLimitOption() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     let newTransaction = try database.createTransaction()
@@ -1297,7 +1359,7 @@ func transactionSizeLimitOption() async throws {
 
     // Try to write more data than the limit allows
     let largeValue = String(repeating: "x", count: 200)
-    newTransaction.setValue(largeValue, for: "test_size_limit_key")
+    try newTransaction.setValue(largeValue, for: "test_size_limit_key")
 
     do {
         _ = try await newTransaction.commit()
@@ -1358,11 +1420,11 @@ func transactionOptionConvenienceMethods() throws {
 @Test("getRange with KeySelectors - basic functionality")
 func getRangeWithKeySelectors() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_", endKey: "test`")
+    try transaction.clearRange(beginKey: "test_", endKey: "test`")
     _ = try await transaction.commit()
 
     // Set up test data
@@ -1370,17 +1432,17 @@ func getRangeWithKeySelectors() async throws {
     for i in 0 ... 99 {
         let key = "test_read_range_" + String(i).leftPad(toLength: 3, withPad: "0")
         let value = "value_\(i)"
-        newTransaction.setValue(value, for: key)
+        try newTransaction.setValue(value, for: key)
     }
     _ = try await newTransaction.commit()
 
-    // Test getRange method with limited results to trigger pre-fetching
+    // Exercise a bounded key range through demand-driven iteration.
     let readTransaction = try database.createTransaction()
     let beginSelector = FDB.KeySelector.firstGreaterOrEqual("test_read_range_015")
     let endSelector = FDB.KeySelector.firstGreaterOrEqual("test_read_range_032")
 
     let asyncSequence = readTransaction.getRange(
-        beginSelector: beginSelector, endSelector: endSelector
+        from: beginSelector, to: endSelector
     )
 
     var count = 0
@@ -1405,36 +1467,36 @@ func getRangeWithKeySelectors() async throws {
     #expect(count == 17, "Should read expected number of records in range")
 }
 
-@Test("getRange with AsyncIterator - comprehensive pre-fetching test")
-func getRangeAsyncIteratorPrefetch() async throws {
+@Test("getRange AsyncIterator traverses a bounded range in key order")
+func getRangeAsyncIteratorTraversesBoundedRange() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Clear test key range
-    transaction.clearRange(beginKey: "test_async_", endKey: "test_async`")
+    try transaction.clearRange(beginKey: "test_async_", endKey: "test_async`")
     _ = try await transaction.commit()
 
-    // Set up test data - more records to test pre-fetching
+    // Set up enough records to cross multiple range pages.
     let writeTransaction = try database.createTransaction()
     for i in 0 ... 149 {
         let key = "test_async_iter_" + String(i).leftPad(toLength: 3, withPad: "0")
         let value = "async_value_\(i)"
-        writeTransaction.setValue(value, for: key)
+        try writeTransaction.setValue(value, for: key)
     }
     _ = try await writeTransaction.commit()
 
-    // Test with small limit to force multiple batches and pre-fetching
+    // Traverse enough values to exercise page continuation.
     let readTransaction = try database.createTransaction()
     let beginSelector = FDB.KeySelector.firstGreaterOrEqual("test_async_iter_020")
     let endSelector = FDB.KeySelector.firstGreaterOrEqual("test_async_iter_080")
 
     let asyncSequence = readTransaction.getRange(
-        beginSelector: beginSelector, endSelector: endSelector
+        from: beginSelector, to: endSelector
     )
 
     var records: [(String, String)] = []
-    var iterator = asyncSequence.makeAsyncIterator()
+    let iterator = asyncSequence.makeAsyncIterator()
 
     // Read records one by one to test iterator behavior
     while let kv = try await iterator.next() {
@@ -1461,26 +1523,24 @@ func getRangeAsyncIteratorPrefetch() async throws {
     #expect(records.last!.0.hasPrefix("test_async_iter_0"), "Last record should be in expected range")
 }
 
-@Test("Pre-fetch task is cancelled when sequence exhausts")
-func testPreFetchCancelledOnExhaustion() async throws {
+@Test("Range exhaustion leaves no database read outstanding")
+func rangeExhaustionLeavesNoOutstandingRead() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Use unique prefix to avoid conflicts with other tests
-    let testId = UInt64.random(in: 0..<UInt64.max)
-    let testPrefix = "prefetch_cancel_\(testId)_"
+    let testID = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "range_exhaustion_\(testID)_"
 
     // Setup: insert small amount of data
     try await database.withTransaction { transaction in
         for i in 0..<5 {
             let key = "\(testPrefix)data_\(i)"
-            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+            try transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
         }
     }
 
-    // Run multiple iterations to increase chance of catching race condition
-    // If pre-fetch task is not cancelled on exhaustion, this will fail with
-    // "Operation issued while a commit was outstanding" error
+    // Repeatedly prove that commit begins after all range I/O has completed.
     for iteration in 0..<20 {
         try await database.withTransaction { transaction in
             let sequence = transaction.getRange(
@@ -1498,40 +1558,37 @@ func testPreFetchCancelledOnExhaustion() async throws {
             #expect(count == 5, "Should read all 5 records")
 
             // Write immediately after iteration completes (to different key range)
-            // If pre-fetch task is still running, this will cause
-            // "Operation issued while a commit was outstanding" on commit
             let markerKey = "\(testPrefix)marker_\(iteration)"
-            transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
+            try transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
         }
     }
 
     // Cleanup
     try await database.withTransaction { transaction in
-        transaction.clearRange(
+        try transaction.clearRange(
             beginKey: Array(testPrefix.utf8),
             endKey: Array((testPrefix + "~").utf8)
         )
     }
 }
 
-@Test("Pre-fetch task is cancelled when limit is reached")
-func testPreFetchCancelledOnLimitReached() async throws {
+@Test("Range limit leaves no database read outstanding")
+func rangeLimitLeavesNoOutstandingRead() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
-    let testId = UInt64.random(in: 0..<UInt64.max)
-    let testPrefix = "prefetch_limit_\(testId)_"
+    let testID = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "range_limit_\(testID)_"
 
     // Setup: insert more data than the limit
     try await database.withTransaction { transaction in
         for i in 0..<20 {
             let key = "\(testPrefix)data_\(String(format: "%03d", i))"
-            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+            try transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
         }
     }
 
-    // When limit is reached, pre-fetch task must be awaited before commit.
-    // Without the fix, the in-flight pre-fetch C future causes error 2017.
+    // Reaching the logical limit must leave the transaction ready to commit.
     for iteration in 0..<20 {
         try await database.withTransaction { transaction in
             let sequence = transaction.getRange(
@@ -1549,38 +1606,37 @@ func testPreFetchCancelledOnLimitReached() async throws {
             #expect(count == 5, "Should read exactly 5 records (limit)")
 
             let markerKey = "\(testPrefix)marker_\(iteration)"
-            transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
+            try transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
         }
     }
 
     // Cleanup
     try await database.withTransaction { transaction in
-        transaction.clearRange(
+        try transaction.clearRange(
             beginKey: Array(testPrefix.utf8),
             endKey: Array((testPrefix + "~").utf8)
         )
     }
 }
 
-@Test("Pre-fetch task is cancelled when iteration is abandoned via break")
-func testPreFetchCancelledOnBreak() async throws {
+@Test("Range break leaves no database read outstanding")
+func rangeBreakLeavesNoOutstandingRead() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
-    let testId = UInt64.random(in: 0..<UInt64.max)
-    let testPrefix = "prefetch_break_\(testId)_"
+    let testID = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "range_break_\(testID)_"
 
     // Setup: insert data
     try await database.withTransaction { transaction in
         for i in 0..<20 {
             let key = "\(testPrefix)data_\(String(format: "%03d", i))"
-            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+            try transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
         }
     }
 
-    // When break exits the loop, deinit cancels the pre-fetch task.
-    // The withTaskCancellationHandler in Future.getAsync() propagates
-    // cancellation to the C future via fdb_future_cancel().
+    // A returned row has no speculative next-page read behind it, so breaking
+    // the loop cannot race a following mutation or commit.
     for iteration in 0..<20 {
         try await database.withTransaction { transaction in
             let sequence = transaction.getRange(
@@ -1600,32 +1656,32 @@ func testPreFetchCancelledOnBreak() async throws {
             #expect(count == 3, "Should read exactly 3 records before break")
 
             let markerKey = "\(testPrefix)marker_\(iteration)"
-            transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
+            try transaction.setValue(Array("done".utf8), for: Array(markerKey.utf8))
         }
     }
 
     // Cleanup
     try await database.withTransaction { transaction in
-        transaction.clearRange(
+        try transaction.clearRange(
             beginKey: Array(testPrefix.utf8),
             endKey: Array((testPrefix + "~").utf8)
         )
     }
 }
 
-@Test("Task cancellation propagates to FDB C future")
-func testTaskCancellationPropagatesToCFuture() async throws {
+@Test("Task cancellation stops a pending range read")
+func taskCancellationStopsPendingRangeRead() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
-    let testId = UInt64.random(in: 0..<UInt64.max)
-    let testPrefix = "task_cancel_\(testId)_"
+    let testID = UInt64.random(in: 0..<UInt64.max)
+    let testPrefix = "task_cancel_\(testID)_"
 
     // Setup: insert data
     try await database.withTransaction { transaction in
         for i in 0..<10 {
             let key = "\(testPrefix)data_\(String(format: "%03d", i))"
-            transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
+            try transaction.setValue(Array("value\(i)".utf8), for: Array(key.utf8))
         }
     }
 
@@ -1653,22 +1709,43 @@ func testTaskCancellationPropagatesToCFuture() async throws {
     // Cancel the task
     task.cancel()
 
-    // The task should complete (either successfully or with cancellation)
-    // without hanging indefinitely. This verifies fdb_future_cancel() works.
+    // Cancellation must retain Swift structured-concurrency semantics instead
+    // of being normalized into an FDB transport error.
     do {
         try await task.value
+        Issue.record("Expected CancellationError")
     } catch is CancellationError {
-        // Expected: task was cancelled
+        // Expected.
     } catch {
-        // FDB errors from cancellation are also acceptable
+        Issue.record("Expected CancellationError, got \(error)")
     }
 
     // Cleanup
     try await database.withTransaction { transaction in
-        transaction.clearRange(
+        try transaction.clearRange(
             beginKey: Array(testPrefix.utf8),
             endKey: Array((testPrefix + "~").utf8)
         )
+    }
+}
+
+@Test("External transaction cancellation remains an FDB error")
+func testExternalTransactionCancellationRemainsFDBError() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openTestDatabase()
+    let transaction = try database.createTransaction()
+    transaction.cancel()
+
+    do {
+        _ = try await transaction.getValue(for: [0x01])
+        Issue.record("Expected transaction cancellation to fail")
+    } catch is CancellationError {
+        Issue.record("External transaction cancellation must not become CancellationError")
+    } catch let error as FDBError {
+        #expect(error.code == FDBErrorCode.transactionCancelled.rawValue)
+        #expect(error.retryDisposition == .never)
+    } catch {
+        Issue.record("Expected FDBError, got \(error)")
     }
 }
 
@@ -1682,15 +1759,15 @@ extension String {
 @Test("getEstimatedRangeSizeBytes returns size estimate")
 func testGetEstimatedRangeSizeBytes() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Write some test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "test_size_", endKey: "test_size`")
+        try transaction.clearRange(beginKey: "test_size_", endKey: "test_size`")
         for i in 0 ..< 100 {
             let key = "test_size_\(String.padded(i))"
             let value = String(repeating: "x", count: 1000)
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -1708,15 +1785,15 @@ func testGetEstimatedRangeSizeBytes() async throws {
 @Test("getRangeSplitPoints returns split keys")
 func testGetRangeSplitPoints() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Write some test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "test_split_", endKey: "test_split`")
+        try transaction.clearRange(beginKey: "test_split_", endKey: "test_split`")
         for i in 0 ..< 200 {
             let key = "test_split_\(String.padded(i))"
             let value = String(repeating: "y", count: 500)
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -1733,17 +1810,17 @@ func testGetRangeSplitPoints() async throws {
 
     // Should return at least begin and end keys
     #expect(splitPoints.count >= 2, "Should return at least begin and end keys")
-    #expect(splitPoints.first == beginKey, "First split point should be begin key")
-    #expect(splitPoints.last == endKey, "Last split point should be end key")
+    #expect(splitPoints.first?.copyBytes() == beginKey, "First split point should be begin key")
+    #expect(splitPoints.last?.copyBytes() == endKey, "Last split point should be end key")
 }
 
 @Test("getCommittedVersion returns version after commit")
 func testGetCommittedVersion() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
-    transaction.setValue("test_value", for: "test_version_key")
+    try transaction.setValue("test_value", for: "test_version_key")
     _ = try await transaction.commit()
 
     let committedVersion = try transaction.getCommittedVersion()
@@ -1753,7 +1830,7 @@ func testGetCommittedVersion() async throws {
 @Test("getCommittedVersion returns -1 for read-only transaction")
 func getCommittedVersionReadOnly() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Read-only transaction
@@ -1764,41 +1841,41 @@ func getCommittedVersionReadOnly() async throws {
     #expect(committedVersion == -1, "Read-only transaction should return -1")
 }
 
-@Test("getApproximateSize returns transaction size")
-func testGetApproximateSize() async throws {
+@Test("approximateSize returns transaction size")
+func approximateSizeTracksTransactionFootprint() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
     let transaction = try database.createTransaction()
 
     // Initial size
-    let initialSize = try await transaction.getApproximateSize()
+    let initialSize = try await transaction.approximateSize()
     #expect(initialSize >= 0, "Initial size should be non-negative")
 
     // Add some mutations
     for i in 0 ..< 10 {
         let key = "test_approx_\(i)"
         let value = String(repeating: "z", count: 100)
-        transaction.setValue(value, for: key)
+        try transaction.setValue(value, for: key)
     }
 
     // Size should increase
-    let sizeAfterMutations = try await transaction.getApproximateSize()
+    let sizeAfterMutations = try await transaction.approximateSize()
     #expect(sizeAfterMutations > initialSize, "Size should increase after mutations")
 }
 
 @Test("addConflictRange read conflict")
 func addReadConflictRange() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_conflict_", endKey: "test_conflict`")
+    try clearTransaction.clearRange(beginKey: "test_conflict_", endKey: "test_conflict`")
     _ = try await clearTransaction.commit()
 
     // Set up initial data
     let setupTransaction = try database.createTransaction()
-    setupTransaction.setValue("initial_value", for: "test_conflict_a")
+    try setupTransaction.setValue("initial_value", for: "test_conflict_a")
     _ = try await setupTransaction.commit()
 
     // Test adding read conflict range
@@ -1817,11 +1894,11 @@ func addReadConflictRange() async throws {
 @Test("addConflictRange write conflict")
 func addWriteConflictRange() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_write_conflict_", endKey: "test_write_conflict`")
+    try clearTransaction.clearRange(beginKey: "test_write_conflict_", endKey: "test_write_conflict`")
     _ = try await clearTransaction.commit()
 
     // Test adding write conflict range
@@ -1840,16 +1917,16 @@ func addWriteConflictRange() async throws {
 @Test("addConflictRange detects concurrent write conflicts")
 func conflictRangeDetectsConcurrentWrites() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_concurrent_", endKey: "test_concurrent`")
+    try clearTransaction.clearRange(beginKey: "test_concurrent_", endKey: "test_concurrent`")
     _ = try await clearTransaction.commit()
 
     // Set up initial data
     let setupTransaction = try database.createTransaction()
-    setupTransaction.setValue("initial", for: "test_concurrent_key")
+    try setupTransaction.setValue("initial", for: "test_concurrent_key")
     _ = try await setupTransaction.commit()
 
     // Create first transaction and add a write conflict range
@@ -1862,7 +1939,7 @@ func conflictRangeDetectsConcurrentWrites() async throws {
 
     // Create second transaction that writes to the same key
     let transaction2 = try database.createTransaction()
-    transaction2.setValue("modified_by_tr2", for: "test_concurrent_key")
+    try transaction2.setValue("modified_by_tr2", for: "test_concurrent_key")
     _ = try await transaction2.commit()
 
     // Now try to commit transaction1 - it should detect a conflict
@@ -1871,18 +1948,18 @@ func conflictRangeDetectsConcurrentWrites() async throws {
         // If it succeeds, that's also acceptable behavior
     } catch let error as FDBError {
         // Expected to fail with a conflict error (not_committed)
-        #expect(error.isRetryable, "Conflict should be a retryable error")
+        #expect(error.retryDisposition == .retryableNotCommitted)
     }
 }
 
 @Test("addConflictRange multiple ranges")
 func addMultipleConflictRanges() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    clearTransaction.clearRange(beginKey: "test_multi_", endKey: "test_multi`")
+    try clearTransaction.clearRange(beginKey: "test_multi_", endKey: "test_multi`")
     _ = try await clearTransaction.commit()
 
     // Test adding multiple conflict ranges
@@ -1916,18 +1993,18 @@ func conflictRangeTypeValues() {
 
 // MARK: - Reverse Range Query Tests
 
-@Test("getRangeNative with reverse returns keys in descending order")
-func getRangeNativeReverse() async throws {
+@Test("readRangeBatch with reverse returns keys in descending order")
+func readRangeBatchReverse() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_reverse_", endKey: "rangetest_reverse`")
+        try transaction.clearRange(beginKey: "rangetest_reverse_", endKey: "rangetest_reverse`")
         for i in 1...5 {
             let key = "rangetest_reverse_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -1937,9 +2014,9 @@ func getRangeNativeReverse() async throws {
     let beginSelector = FDB.KeySelector.firstGreaterOrEqual("rangetest_reverse_")
     let endSelector = FDB.KeySelector.firstGreaterOrEqual("rangetest_reverse`")
 
-    let result = try await transaction.getRangeNative(
-        beginSelector: beginSelector,
-        endSelector: endSelector,
+    let result = try await transaction.readRangeBatch(
+        from: beginSelector,
+        to: endSelector,
         limit: 0,
         targetBytes: 0,
         streamingMode: .iterator,
@@ -1957,27 +2034,27 @@ func getRangeNativeReverse() async throws {
     #expect(keys[4] == "rangetest_reverse_001", "Last key should be the smallest")
 }
 
-@Test("getRangeNative reverse with limit")
-func getRangeNativeReverseWithLimit() async throws {
+@Test("readRangeBatch reverse with limit")
+func readRangeBatchReverseWithLimit() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_rev_limit_", endKey: "rangetest_rev_limit`")
+        try transaction.clearRange(beginKey: "rangetest_rev_limit_", endKey: "rangetest_rev_limit`")
         for i in 1...10 {
             let key = "rangetest_rev_limit_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
 
     // Test reverse range query with limit
     let transaction = try database.createTransaction()
-    let result = try await transaction.getRangeNative(
-        beginSelector: .firstGreaterOrEqual("rangetest_rev_limit_"),
-        endSelector: .firstGreaterOrEqual("rangetest_rev_limit`"),
+    let result = try await transaction.readRangeBatch(
+        from: .firstGreaterOrEqual("rangetest_rev_limit_"),
+        to: .firstGreaterOrEqual("rangetest_rev_limit`"),
         limit: 3,
         targetBytes: 0,
         streamingMode: .iterator,
@@ -1996,17 +2073,17 @@ func getRangeNativeReverseWithLimit() async throws {
 }
 
 @Test("getRange AsyncSequence with reverse")
-func getAsyncRangeReverse() async throws {
+func rangeReadsInReverseOrder() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_async_rev_", endKey: "rangetest_async_rev`")
+        try transaction.clearRange(beginKey: "rangetest_async_rev_", endKey: "rangetest_async_rev`")
         for i in 1...5 {
             let key = "rangetest_async_rev_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2029,17 +2106,17 @@ func getAsyncRangeReverse() async throws {
 }
 
 @Test("getRange AsyncSequence reverse with limit")
-func getAsyncRangeReverseWithLimit() async throws {
+func reverseRangeHonorsLimit() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_asyncrevlim_", endKey: "rangetest_asyncrevlim`")
+        try transaction.clearRange(beginKey: "rangetest_asyncrevlim_", endKey: "rangetest_asyncrevlim`")
         for i in 1...20 {
             let key = "rangetest_asyncrevlim_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2063,17 +2140,17 @@ func getAsyncRangeReverseWithLimit() async throws {
 }
 
 @Test("getRange with streamingMode wantAll")
-func getAsyncRangeWithStreamingModeWantAll() async throws {
+func rangeUsesWantAllStreamingMode() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_streaming_", endKey: "rangetest_streaming`")
+        try transaction.clearRange(beginKey: "rangetest_streaming_", endKey: "rangetest_streaming`")
         for i in 1...10 {
             let key = "rangetest_streaming_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2094,18 +2171,18 @@ func getAsyncRangeWithStreamingModeWantAll() async throws {
 }
 
 @Test("getRange reverse iteration continues correctly across batches")
-func getAsyncRangeReverseContinuation() async throws {
+func reverseRangeContinuesAcrossBatches() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data - enough to span multiple batches
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_rev_batch_", endKey: "rangetest_rev_batch`")
+        try transaction.clearRange(beginKey: "rangetest_rev_batch_", endKey: "rangetest_rev_batch`")
         for i in 1...100 {
             let key = "rangetest_rev_batch_\(String.padded(i))"
             // Larger values to ensure multiple batches
             let value = String(repeating: "x", count: 500)
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2137,17 +2214,17 @@ func getAsyncRangeReverseContinuation() async throws {
 // MARK: - Forward Limit Tests
 
 @Test("getRange AsyncSequence forward with limit")
-func getAsyncRangeForwardWithLimit() async throws {
+func forwardRangeHonorsLimit() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_fwd_limit_", endKey: "rangetest_fwd_limit`")
+        try transaction.clearRange(beginKey: "rangetest_fwd_limit_", endKey: "rangetest_fwd_limit`")
         for i in 1...20 {
             let key = "rangetest_fwd_limit_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2170,17 +2247,17 @@ func getAsyncRangeForwardWithLimit() async throws {
 }
 
 @Test("getRange forward iteration continues correctly across batches with limit")
-func getAsyncRangeForwardContinuationWithLimit() async throws {
+func forwardRangeContinuesUntilLimit() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data - enough to span multiple batches
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_fwd_batch_", endKey: "rangetest_fwd_batch`")
+        try transaction.clearRange(beginKey: "rangetest_fwd_batch_", endKey: "rangetest_fwd_batch`")
         for i in 1...100 {
             let key = "rangetest_fwd_batch_\(String.padded(i))"
             let value = String(repeating: "x", count: 500)
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2209,113 +2286,23 @@ func getAsyncRangeForwardContinuationWithLimit() async throws {
     #expect(keys.last == "rangetest_fwd_batch_050", "Last key should be 050")
 }
 
-// MARK: - Backward Compatibility Tests
-
-@Test("Legacy getRange(beginSelector:endSelector:) still works")
-func legacyGetRangeWithSelectors() async throws {
-    try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
-
-    // Clear and set up test data
-    try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_legacy_sel_", endKey: "rangetest_legacy_sel`")
-        for i in 1...5 {
-            let key = "rangetest_legacy_sel_\(String.padded(i))"
-            let value = "value\(i)"
-            transaction.setValue(value, for: key)
-        }
-        return ()
-    }
-
-    // Use legacy API
-    let transaction = try database.createTransaction()
-    var keys: [String] = []
-
-    for try await (key, _) in transaction.getRange(
-        beginSelector: .firstGreaterOrEqual("rangetest_legacy_sel_"),
-        endSelector: .firstGreaterOrEqual("rangetest_legacy_sel`")
-    ) {
-        keys.append(String(bytes: key))
-    }
-
-    #expect(keys.count == 5, "Should return all 5 records")
-    #expect(keys[0] == "rangetest_legacy_sel_001", "First should be key 001")
-    #expect(keys[4] == "rangetest_legacy_sel_005", "Last should be key 005")
-}
-
-@Test("Legacy getRange(begin:end:) with Selectable still works")
-func legacyGetRangeWithSelectable() async throws {
-    try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
-
-    // Clear and set up test data
-    try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_legacy_str_", endKey: "rangetest_legacy_str`")
-        for i in 1...3 {
-            let key = "rangetest_legacy_str_\(String.padded(i))"
-            let value = "value\(i)"
-            transaction.setValue(value, for: key)
-        }
-        return ()
-    }
-
-    // Use legacy API with Selectable (String)
-    let transaction = try database.createTransaction()
-    var keys: [String] = []
-
-    for try await (key, _) in transaction.getRange(
-        begin: "rangetest_legacy_str_",
-        end: "rangetest_legacy_str`"
-    ) {
-        keys.append(String(bytes: key))
-    }
-
-    #expect(keys.count == 3, "Should return all 3 records")
-}
-
-@Test("Legacy getRangeNative with default parameters still works")
-func legacyGetRangeNativeDefaults() async throws {
-    try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
-
-    // Clear and set up test data
-    try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_legacy_native_", endKey: "rangetest_legacy_native`")
-        for i in 1...3 {
-            let key = "rangetest_legacy_native_\(String.padded(i))"
-            let value = "value\(i)"
-            transaction.setValue(value, for: key)
-        }
-        return ()
-    }
-
-    // Use legacy getRangeNative API with defaults
-    let transaction = try database.createTransaction()
-    let result = try await transaction.getRangeNative(
-        beginSelector: .firstGreaterOrEqual("rangetest_legacy_native_"),
-        endSelector: .firstGreaterOrEqual("rangetest_legacy_native`")
-    )
-
-    #expect(result.records.count == 3, "Should return all 3 records")
-}
-
 // MARK: - Bytes-based API Tests
 
 @Test("getRange with Bytes keys")
 func getRangeWithBytesKeys() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     let prefix: FDB.Bytes = Array("rangetest_bytes_range_".utf8)
     let endPrefix: FDB.Bytes = Array("rangetest_bytes_range`".utf8)
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: prefix, endKey: endPrefix)
+        try transaction.clearRange(beginKey: prefix, endKey: endPrefix)
         for i in 1...5 {
             let key = Array("rangetest_bytes_range_\(String.padded(i))".utf8)
             let value = Array("value\(i)".utf8)
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2342,18 +2329,18 @@ func getRangeWithBytesKeys() async throws {
 @Test("getRange with Bytes keys and reverse")
 func getRangeWithBytesKeysReverse() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     let prefix: FDB.Bytes = Array("rangetest_bytes_rev_".utf8)
     let endPrefix: FDB.Bytes = Array("rangetest_bytes_rev`".utf8)
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: prefix, endKey: endPrefix)
+        try transaction.clearRange(beginKey: prefix, endKey: endPrefix)
         for i in 1...5 {
             let key = Array("rangetest_bytes_rev_\(String.padded(i))".utf8)
             let value = Array("value\(i)".utf8)
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2375,30 +2362,30 @@ func getRangeWithBytesKeysReverse() async throws {
     #expect(keys[4] == "rangetest_bytes_rev_001", "Last should be smallest key")
 }
 
-@Test("getRangeNative with Bytes keys and all parameters")
-func getRangeNativeWithBytesAllParams() async throws {
+@Test("readRangeBatch with Bytes keys and all parameters")
+func readRangeBatchWithBytesAllParams() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
-    let prefix: FDB.Bytes = Array("rangetest_native_bytes_".utf8)
-    let endPrefix: FDB.Bytes = Array("rangetest_native_bytes`".utf8)
+    let prefix: FDB.Bytes = Array("rangetest_database_bytes_".utf8)
+    let endPrefix: FDB.Bytes = Array("rangetest_database_bytes`".utf8)
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: prefix, endKey: endPrefix)
+        try transaction.clearRange(beginKey: prefix, endKey: endPrefix)
         for i in 1...10 {
-            let key = Array("rangetest_native_bytes_\(String.padded(i))".utf8)
+            let key = Array("rangetest_database_bytes_\(String.padded(i))".utf8)
             let value = Array("value\(i)".utf8)
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
 
-    // Test getRangeNative with Bytes keys
+    // Test readRangeBatch with Bytes keys
     let transaction = try database.createTransaction()
-    let result = try await transaction.getRangeNative(
-        beginKey: prefix,
-        endKey: endPrefix,
+    let result = try await transaction.readRangeBatch(
+        from: prefix,
+        to: endPrefix,
         limit: 5,
         targetBytes: 0,
         streamingMode: .wantAll,
@@ -2409,7 +2396,7 @@ func getRangeNativeWithBytesAllParams() async throws {
 
     #expect(result.records.count == 5, "Should return 5 records due to limit")
     let firstKey = String(bytes: result.records[0].0)
-    #expect(firstKey == "rangetest_native_bytes_010", "First key should be largest")
+    #expect(firstKey == "rangetest_database_bytes_010", "First key should be largest")
 }
 
 // MARK: - Empty Range Tests
@@ -2417,11 +2404,11 @@ func getRangeNativeWithBytesAllParams() async throws {
 @Test("getRange on empty range returns no results")
 func getRangeEmptyRange() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear the range to ensure it's empty
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_empty_range_", endKey: "rangetest_empty_range`")
+        try transaction.clearRange(beginKey: "rangetest_empty_range_", endKey: "rangetest_empty_range`")
         return ()
     }
 
@@ -2442,11 +2429,11 @@ func getRangeEmptyRange() async throws {
 @Test("getRange reverse on empty range returns no results")
 func getRangeEmptyRangeReverse() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear the range to ensure it's empty
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_empty_rev_", endKey: "rangetest_empty_rev`")
+        try transaction.clearRange(beginKey: "rangetest_empty_rev_", endKey: "rangetest_empty_rev`")
         return ()
     }
 
@@ -2470,15 +2457,15 @@ func getRangeEmptyRangeReverse() async throws {
 @Test("getRange with snapshot mode")
 func getRangeWithSnapshotMode() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_snapshot_", endKey: "rangetest_snapshot`")
+        try transaction.clearRange(beginKey: "rangetest_snapshot_", endKey: "rangetest_snapshot`")
         for i in 1...5 {
             let key = "rangetest_snapshot_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }
@@ -2501,15 +2488,15 @@ func getRangeWithSnapshotMode() async throws {
 @Test("getRange reverse with snapshot mode")
 func getRangeReverseWithSnapshotMode() async throws {
     try await FDBClient.maybeInitialize()
-    let database = try FDBClient.openDatabase()
+    let database = try FDBClient.openTestDatabase()
 
     // Clear and set up test data
     try await database.withTransaction { transaction in
-        transaction.clearRange(beginKey: "rangetest_snap_rev_", endKey: "rangetest_snap_rev`")
+        try transaction.clearRange(beginKey: "rangetest_snap_rev_", endKey: "rangetest_snap_rev`")
         for i in 1...5 {
             let key = "rangetest_snap_rev_\(String.padded(i))"
             let value = "value\(i)"
-            transaction.setValue(value, for: key)
+            try transaction.setValue(value, for: key)
         }
         return ()
     }

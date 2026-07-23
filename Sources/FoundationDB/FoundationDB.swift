@@ -24,7 +24,7 @@
 /// and transaction retry logic. Implementations handle the underlying database
 /// connection and resource management.
 /// Database interface for FoundationDB operations
-public protocol DatabaseProtocol {
+public protocol DatabaseProtocol: Sendable {
     associatedtype Transaction: TransactionProtocol
 
     /// Creates a new transaction for database operations.
@@ -60,26 +60,35 @@ public protocol TransactionProtocol: Sendable {
     ///   - snapshot: Whether to perform a snapshot read.
     /// - Returns: The value associated with the key, or nil if not found.
     /// - Throws: `FDBError` if the operation fails.
-    func getValue(for key: FDB.Bytes, snapshot: Bool) async throws -> FDB.Bytes?
+    func getValue<Key: FDB.ByteInput>(
+        for key: Key,
+        snapshot: Bool
+    ) async throws -> FDB.ByteString?
 
     /// Sets a value for the given key.
     ///
     /// - Parameters:
     ///   - value: The value to set as a byte array.
     ///   - key: The key to associate with the value.
-    func setValue(_ value: FDB.Bytes, for key: FDB.Bytes)
+    func setValue<Value: FDB.ByteInput, Key: FDB.ByteInput>(
+        _ value: Value,
+        for key: Key
+    ) throws
 
     /// Removes a key-value pair from the database.
     ///
     /// - Parameter key: The key to remove as a byte array.
-    func clear(key: FDB.Bytes)
+    func clear<Key: FDB.ByteInput>(key: Key) throws
 
     /// Removes all key-value pairs in the given range.
     ///
     /// - Parameters:
     ///   - beginKey: The start of the range (inclusive) as a byte array.
     ///   - endKey: The end of the range (exclusive) as a byte array.
-    func clearRange(beginKey: FDB.Bytes, endKey: FDB.Bytes)
+    func clearRange<Begin: FDB.ByteInput, End: FDB.ByteInput>(
+        beginKey: Begin,
+        endKey: End
+    ) throws
 
     /// Resolves a key selector to an actual key.
     ///
@@ -88,27 +97,10 @@ public protocol TransactionProtocol: Sendable {
     ///   - snapshot: Whether to perform a snapshot read.
     /// - Returns: The resolved key, or nil if no key matches.
     /// - Throws: `FDBError` if the operation fails.
-    func getKey(selector: FDB.Selectable, snapshot: Bool) async throws -> FDB.Bytes?
-
-    /// Resolves a key selector to an actual key.
-    ///
-    /// - Parameters:
-    ///   - selector: The key selector to resolve.
-    ///   - snapshot: Whether to perform a snapshot read.
-    /// - Returns: The resolved key, or nil if no key matches.
-    /// - Throws: `FDBError` if the operation fails.
-    func getKey(selector: FDB.KeySelector, snapshot: Bool) async throws -> FDB.Bytes?
-
-    /// Returns an AsyncSequence that yields key-value pairs within a range.
-    ///
-    /// - Parameters:
-    ///   - beginSelector: The key selector for the start of the range.
-    ///   - endSelector: The key selector for the end of the range.
-    ///   - snapshot: Whether to perform a snapshot read.
-    /// - Returns: An async sequence that yields key-value pairs.
-    func getRange(
-        beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector, snapshot: Bool
-    ) -> FDB.AsyncKVSequence
+    func getKey(
+        selector: FDB.KeySelector,
+        snapshot: Bool
+    ) async throws -> FDB.ByteString?
 
     /// Retrieves key-value pairs within a range using key selectors.
     ///
@@ -118,26 +110,26 @@ public protocol TransactionProtocol: Sendable {
     /// For most use cases, prefer using `getRange(from:to:...)` which returns an `AsyncSequence`.
     ///
     /// - Parameters:
-    ///   - beginSelector: The key selector for the start of the range.
-    ///   - endSelector: The key selector for the end of the range.
+    ///   - begin: The key selector for the start of the range.
+    ///   - end: The key selector for the end of the range.
     ///   - limit: Maximum number of key-value pairs to return (0 for no limit).
     ///   - targetBytes: Soft cap on bytes to return (0 for no limit).
     ///   - streamingMode: How to batch/stream results from the server.
     ///   - iteration: Iteration number for ITERATOR streaming mode (starts at 1).
     ///   - reverse: Whether to scan in reverse lexicographical order.
     ///   - snapshot: Whether to perform a snapshot read.
-    /// - Returns: A `ResultRange` containing the key-value pairs and more flag.
+    /// - Returns: A `RangeBatch` containing the key-value pairs and continuation state.
     /// - Throws: `FDBError` if the operation fails.
-    func getRangeNative(
-        beginSelector: FDB.KeySelector,
-        endSelector: FDB.KeySelector,
+    func readRangeBatch(
+        from begin: FDB.KeySelector,
+        to end: FDB.KeySelector,
         limit: Int,
         targetBytes: Int,
         streamingMode: FDB.StreamingMode,
         iteration: Int,
         reverse: Bool,
         snapshot: Bool
-    ) async throws -> ResultRange
+    ) async throws -> RangeBatch
 
     /// Commits the transaction.
     ///
@@ -156,7 +148,7 @@ public protocol TransactionProtocol: Sendable {
     ///
     /// - Returns: The transaction's versionstamp as a key, or nil if not available.
     /// - Throws: `FDBError` if the operation fails.
-    func getVersionstamp() async throws -> FDB.Bytes?
+    func getVersionstamp() async throws -> FDB.ByteString?
 
     /// Sets the read version for snapshot reads.
     ///
@@ -188,7 +180,10 @@ public protocol TransactionProtocol: Sendable {
     ///   - endKey: The end of the range (exclusive).
     /// - Returns: The estimated size in bytes.
     /// - Throws: `FDBError` if the operation fails.
-    func getEstimatedRangeSizeBytes(beginKey: FDB.Bytes, endKey: FDB.Bytes) async throws -> Int
+    func getEstimatedRangeSizeBytes<Begin: FDB.ByteInput, End: FDB.ByteInput>(
+        beginKey: Begin,
+        endKey: End
+    ) async throws -> Int
 
     /// Returns a list of keys that can split the given range into roughly equal chunks.
     ///
@@ -200,7 +195,11 @@ public protocol TransactionProtocol: Sendable {
     ///   - chunkSize: The desired size of each chunk in bytes.
     /// - Returns: An array of keys representing split points.
     /// - Throws: `FDBError` if the operation fails.
-    func getRangeSplitPoints(beginKey: FDB.Bytes, endKey: FDB.Bytes, chunkSize: Int) async throws -> [[UInt8]]
+    func getRangeSplitPoints<Begin: FDB.ByteInput, End: FDB.ByteInput>(
+        beginKey: Begin,
+        endKey: End,
+        chunkSize: Int
+    ) async throws -> [FDB.ByteString]
 
     /// Returns the version number at which a committed transaction modified the database.
     ///
@@ -215,9 +214,10 @@ public protocol TransactionProtocol: Sendable {
     /// This is the sum of estimated sizes of mutations, read conflict ranges, and write conflict ranges.
     /// Can be called multiple times before commit.
     ///
-    /// - Returns: The approximate size in bytes.
+    /// - Returns: The approximate size in bytes using FoundationDB's native
+    ///   signed 64-bit representation.
     /// - Throws: `FDBError` if the operation fails.
-    func getApproximateSize() async throws -> Int
+    func approximateSize() async throws -> Int64
 
     /// Performs an atomic operation on a key.
     ///
@@ -225,7 +225,11 @@ public protocol TransactionProtocol: Sendable {
     ///   - key: The key to operate on.
     ///   - param: The parameter for the atomic operation.
     ///   - mutationType: The type of atomic operation to perform.
-    func atomicOp(key: FDB.Bytes, param: FDB.Bytes, mutationType: FDB.MutationType)
+    func atomicOp<Key: FDB.ByteInput, Parameter: FDB.ByteInput>(
+        key: Key,
+        param: Parameter,
+        mutationType: FDB.MutationType
+    ) throws
 
     /// Adds a conflict range to the transaction.
     ///
@@ -237,7 +241,11 @@ public protocol TransactionProtocol: Sendable {
     ///   - endKey: The end of the range (exclusive) as a byte array.
     ///   - type: The type of conflict range (read or write).
     /// - Throws: `FDBError` if the operation fails.
-    func addConflictRange(beginKey: FDB.Bytes, endKey: FDB.Bytes, type: FDB.ConflictRangeType) throws
+    func addConflictRange<Begin: FDB.ByteInput, End: FDB.ByteInput>(
+        beginKey: Begin,
+        endKey: End,
+        type: FDB.ConflictRangeType
+    ) throws
 
     // MARK: - Transaction option methods
 
@@ -247,7 +255,13 @@ public protocol TransactionProtocol: Sendable {
     ///   - value: Optional byte array value for the option.
     ///   - option: The transaction option to set.
     /// - Throws: `FDBError` if the option cannot be set.
-    func setOption(to value: FDB.Bytes?, forOption option: FDB.TransactionOption) throws
+    func setOption<Value: FDB.ByteInput>(
+        to value: Value,
+        forOption option: FDB.TransactionOption
+    ) throws
+
+    /// Sets a transaction option that has no value payload.
+    func setOption(forOption option: FDB.TransactionOption) throws
 
     /// Sets a transaction option with a string value.
     ///
@@ -268,7 +282,7 @@ public protocol TransactionProtocol: Sendable {
 
 /// Default implementation of transaction retry logic for `DatabaseProtocol`.
 extension DatabaseProtocol {
-    /// Default implementation of `withTransaction` with automatic retry logic.
+    /// Default implementation of `withTransaction` with certainty-aware retry.
     ///
     /// This implementation automatically retries transactions when they encounter
     /// retryable errors, up to a maximum number of attempts.
@@ -279,76 +293,67 @@ extension DatabaseProtocol {
     public func withTransaction<T: Sendable>(
         _ operation: (TransactionProtocol) async throws -> T
     ) async throws -> T {
-        let maxRetries = 100 // TODO: Remove this.
+        let maximumAttemptCount = 100
+        let transaction = try createTransaction()
 
-        for attempt in 0 ..< maxRetries {
-            let transaction = try createTransaction()
-
+        for attempt in 0..<maximumAttemptCount {
             do {
+                try Task.checkCancellation()
                 let result = try await operation(transaction)
                 let committed = try await transaction.commit()
-
-                if committed {
-                    return result
+                guard committed else {
+                    throw FDBError(.notCommitted)
+                }
+                return result
+            } catch is CancellationError {
+                transaction.cancel()
+                throw CancellationError()
+            } catch let error as FDBError {
+                guard error.retryDisposition == .retryableNotCommitted,
+                      attempt < maximumAttemptCount - 1 else {
+                    transaction.cancel()
+                    throw error
+                }
+                do {
+                    try await transaction.onError(error)
+                } catch {
+                    transaction.cancel()
+                    throw error
                 }
             } catch {
-                // TODO: If user wants to cancel, don't retry.
                 transaction.cancel()
-
-                if let fdbError = error as? FDBError, fdbError.isRetryable {
-                    if attempt < maxRetries - 1 {
-                        continue
-                    }
-                }
-
                 throw error
             }
         }
 
-        throw FDBError(.transactionTooOld)
+        transaction.cancel()
+        throw FDBError(.notCommitted)
     }
 }
 
 extension TransactionProtocol {
-    public func getValue(for key: FDB.Bytes, snapshot: Bool = false) async throws -> FDB.Bytes? {
+    public func getValue<Key: FDB.ByteInput>(
+        for key: Key,
+        snapshot: Bool = false
+    ) async throws -> FDB.ByteString? {
         try await getValue(for: key, snapshot: snapshot)
     }
 
-    public func getKey(selector: FDB.Selectable, snapshot: Bool = false) async throws -> FDB.Bytes? {
+    public func getKey(
+        selector: FDB.Selectable,
+        snapshot: Bool = false
+    ) async throws -> FDB.ByteString? {
         try await getKey(selector: selector.toKeySelector(), snapshot: snapshot)
     }
 
-    public func getKey(selector: FDB.KeySelector, snapshot: Bool = false) async throws -> FDB.Bytes? {
+    public func getKey(
+        selector: FDB.KeySelector,
+        snapshot: Bool = false
+    ) async throws -> FDB.ByteString? {
         try await getKey(selector: selector, snapshot: snapshot)
     }
 
-    // MARK: - Legacy Range Query API (backward compatible)
-
-    public func getRange(
-        beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector, snapshot: Bool = false
-    ) -> FDB.AsyncKVSequence {
-        getRange(from: beginSelector, to: endSelector, snapshot: snapshot)
-    }
-
-    public func getRange(
-        beginSelector: FDB.KeySelector, endSelector: FDB.KeySelector
-    ) -> FDB.AsyncKVSequence {
-        getRange(from: beginSelector, to: endSelector)
-    }
-
-    public func getRange(
-        begin: FDB.Selectable, end: FDB.Selectable, snapshot: Bool = false
-    ) -> FDB.AsyncKVSequence {
-        getRange(from: begin.toKeySelector(), to: end.toKeySelector(), snapshot: snapshot)
-    }
-
-    public func getRange(
-        beginKey: FDB.Bytes, endKey: FDB.Bytes, snapshot: Bool = false
-    ) -> FDB.AsyncKVSequence {
-        getRange(from: beginKey, to: endKey, snapshot: snapshot)
-    }
-
-    // MARK: - New Range Query API
+    // MARK: - Range Query API
 
     /// Returns an AsyncSequence that yields key-value pairs within a range.
     ///
@@ -383,9 +388,9 @@ extension TransactionProtocol {
     }
 
     /// Returns an AsyncSequence for a key range using byte array keys.
-    public func getRange(
-        from beginKey: FDB.Bytes,
-        to endKey: FDB.Bytes,
+    public func getRange<Begin: FDB.ByteInput, End: FDB.ByteInput>(
+        from beginKey: Begin,
+        to endKey: End,
         limit: Int = 0,
         reverse: Bool = false,
         snapshot: Bool = false,
@@ -403,42 +408,20 @@ extension TransactionProtocol {
 
     // MARK: - Low-Level Range Query API
 
-    /// Low-level range query with key selectors (backward compatible).
-    ///
-    /// This overload provides default values for the new parameters
-    /// to maintain backward compatibility with existing code.
-    public func getRangeNative(
-        beginSelector: FDB.KeySelector,
-        endSelector: FDB.KeySelector,
-        limit: Int = 0,
-        snapshot: Bool = false
-    ) async throws -> ResultRange {
-        try await getRangeNative(
-            beginSelector: beginSelector,
-            endSelector: endSelector,
-            limit: limit,
-            targetBytes: 0,
-            streamingMode: .iterator,
-            iteration: 1,
-            reverse: false,
-            snapshot: snapshot
-        )
-    }
-
-    /// Low-level range query using byte array keys.
-    public func getRangeNative(
-        beginKey: FDB.Bytes,
-        endKey: FDB.Bytes,
+    /// Reads one low-level range batch using byte array keys.
+    public func readRangeBatch<Begin: FDB.ByteInput, End: FDB.ByteInput>(
+        from beginKey: Begin,
+        to endKey: End,
         limit: Int = 0,
         targetBytes: Int = 0,
         streamingMode: FDB.StreamingMode = .iterator,
         iteration: Int = 1,
         reverse: Bool = false,
         snapshot: Bool = false
-    ) async throws -> ResultRange {
-        try await getRangeNative(
-            beginSelector: .firstGreaterOrEqual(beginKey),
-            endSelector: .firstGreaterOrEqual(endKey),
+    ) async throws -> RangeBatch {
+        try await readRangeBatch(
+            from: .firstGreaterOrEqual(beginKey),
+            to: .firstGreaterOrEqual(endKey),
             limit: limit,
             targetBytes: targetBytes,
             streamingMode: streamingMode,
@@ -446,10 +429,6 @@ extension TransactionProtocol {
             reverse: reverse,
             snapshot: snapshot
         )
-    }
-
-    public func setOption(forOption option: FDB.TransactionOption) throws {
-        try setOption(to: nil, forOption: option)
     }
 
     public func setOption(to value: String, forOption option: FDB.TransactionOption) throws {

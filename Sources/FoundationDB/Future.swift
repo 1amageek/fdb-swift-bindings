@@ -18,238 +18,364 @@
  * limitations under the License.
  */
 import CFoundationDB
+import Synchronization
 
-/// Protocol for types that can be extracted from FoundationDB C futures.
+/// Opaque handle for one FoundationDB future.
+typealias FutureHandle = OpaquePointer
+
+/// Decodes one result shape from a FoundationDB C future.
 ///
-/// Types conforming to this protocol can be used as the result type for `Future<T>`
-/// and provide the implementation for extracting their value from the underlying
-/// C future object.
-// TODO: Explore ways to use Span and avoid copying bytes from CFuture into Swift.
+/// Decoder types associate a FoundationDB future result shape with its final
+/// output. They mark result shapes and do not represent intermediate values.
+protocol ResultDecoder: Sendable {
+    associatedtype Output: Sendable
 
-protocol FutureResult: Sendable {
-    /// Extracts the result value from a C future.
+    /// Extracts the result value from a FoundationDB future.
     ///
-    /// - Parameter fromFuture: The C future pointer to extract from.
-    /// - Returns: The extracted result value, or nil if no value is present.
+    /// - Parameter future: The future handle to extract from.
+    /// - Returns: The extracted result value.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self?
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> Output
 }
 
-/// A Swift wrapper for FoundationDB C futures that provides async/await support.
+/// An async owner for FoundationDB futures.
 ///
-/// `Future<T>` bridges FoundationDB's callback-based C API with Swift's structured
-/// concurrency model, allowing async operations to be awaited naturally.
+/// `Future<Decoder>` presents FoundationDB completion through structured
+/// concurrency so operations can be awaited naturally.
 ///
 /// ## Usage Example
 /// ```swift
-/// let future = Future<ResultValue>(cFuturePtr)
-/// let result = try await future.getAsync()
+/// let future = Future<ValueResultDecoder>(futureHandle)
+/// let result = try await future.value
 /// ```
-class Future<T: FutureResult> {
-    /// The underlying C future pointer.
-    private let cFuture: CFuturePtr
+final class Future<Decoder: ResultDecoder>: Sendable {
+    /// The owner of the underlying FoundationDB future.
+    private let owner: FutureOwner
 
-    /// Initializes a new Future with the given C future pointer.
+    /// Initializes a future with the given FoundationDB handle.
     ///
-    /// - Parameter cFuture: The C future pointer to wrap.
-    init(_ cFuture: CFuturePtr) {
-        self.cFuture = cFuture
-    }
-
-    /// Cleans up the C future when the instance is deallocated.
-    deinit {
-        fdb_future_destroy(cFuture)
+    /// - Parameter futureHandle: The FoundationDB future to own.
+    init(_ futureHandle: FutureHandle) {
+        self.owner = FutureOwner(futureHandle)
     }
 
     /// Asynchronously waits for the future to complete and returns the result.
     ///
-    /// This method bridges FoundationDB's callback-based API with Swift's async/await,
-    /// allowing the caller to await the result of the underlying C future.
+    /// This property allows the caller to await the underlying C future.
     /// Swift Task cancellation is propagated to the C layer via `fdb_future_cancel()`.
     ///
-    /// - Returns: The result value extracted from the future, or nil if no value is present.
+    /// - Returns: The result value extracted from the future.
     /// - Throws: `FDBError` if the future operation failed or was cancelled.
-    func getAsync() async throws -> T? {
-        // FDB C API: "All future functions are safe for use from any thread"
-        nonisolated(unsafe) let cFuture = self.cFuture
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<T?, Error>) in
-                let box = CallbackBox { [continuation] future in
-                    do {
-                        let err = fdb_future_get_error(future)
-                        if err != 0 {
-                            throw FDBError(code: err)
-                        }
+    var value: Decoder.Output {
+        get async throws {
+            let owner = self.owner
+            if Task.isCancelled {
+                owner.cancel()
+                throw CancellationError()
+            }
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Decoder.Output, Error>) in
+                    let readinessRegistration = FutureReadinessRegistration {
+                        [continuation, owner] future in
+                        do {
+                            guard let future else {
+                                throw FDBError(.internalError)
+                            }
 
-                        let value = try T.extract(fromFuture: cFuture)
-                        continuation.resume(returning: value)
-                    } catch {
-                        continuation.resume(throwing: error)
+                            let error = fdb_future_get_error(future)
+                            if error != 0 {
+                                if error == FDBErrorCode.operationCancelled.rawValue,
+                                   owner.cancellationWasRequested {
+                                    throw CancellationError()
+                                }
+                                throw FDBError(code: error)
+                            }
+
+                            let value = try withExtendedLifetime(owner) {
+                                try Decoder.decode(
+                                    from: future,
+                                    retaining: owner
+                                )
+                            }
+                            continuation.resume(returning: value)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+
+                    let registration = Unmanaged
+                        .passRetained(readinessRegistration)
+                        .toOpaque()
+                    let registrationError = owner.registerReadyHandler(
+                        deliverFutureReadiness,
+                        registration: registration
+                    )
+                    if registrationError != 0 {
+                        _ = Unmanaged<FutureReadinessRegistration>
+                            .fromOpaque(registration)
+                            .takeRetainedValue()
+                        if registrationError == FDBErrorCode.operationCancelled.rawValue,
+                           owner.cancellationWasRequested {
+                            continuation.resume(throwing: CancellationError())
+                        } else {
+                            continuation.resume(
+                                throwing: FDBError(code: registrationError)
+                            )
+                        }
                     }
                 }
-
-                let userdata = Unmanaged.passRetained(box).toOpaque()
-                fdb_future_set_callback(cFuture, fdbFutureCallback, userdata)
+            } onCancel: {
+                owner.cancel()
             }
-        } onCancel: {
-            fdb_future_cancel(cFuture)
         }
     }
 }
 
-/// A container for managing callback functions in the C future system.
+/// Owns a FoundationDB C future across callback and cancellation races.
 ///
-/// This class holds onto Swift callback functions that are passed to the C API,
-/// ensuring they remain alive for the duration of the future operation.
-private final class CallbackBox {
-    /// The callback function to be invoked when the future completes.
-    let callback: (CFuturePtr) -> Void
+/// The C API documents future operations as thread-safe. Storing the pointer
+/// address as a value gives Swift a Sendable owner while ARC guarantees that
+/// destruction cannot occur until the operation, callback, and cancellation
+/// handler have all released the owner.
+final class FutureOwner: Sendable {
+    private let futureIdentity: UInt
+    private let cancellationRequested = Mutex(false)
 
-    /// Initializes a new callback box with the given callback.
-    ///
-    /// - Parameter callback: The callback function to store.
-    init(callback: @escaping (CFuturePtr) -> Void) {
-        self.callback = callback
+    init(_ future: FutureHandle) {
+        self.futureIdentity = UInt(bitPattern: future)
+    }
+
+    deinit {
+        fdb_future_destroy(handle)
+    }
+
+    func registerReadyHandler(
+        _ handler: @escaping FDBCallback,
+        registration: UnsafeMutableRawPointer
+    ) -> Int32 {
+        fdb_future_set_callback(handle, handler, registration)
+    }
+
+    func cancel() {
+        cancellationRequested.withLock { $0 = true }
+        fdb_future_cancel(handle)
+    }
+
+    var cancellationWasRequested: Bool {
+        cancellationRequested.withLock { $0 }
+    }
+
+    private var handle: FutureHandle {
+        guard let handle = OpaquePointer(bitPattern: futureIdentity) else {
+            preconditionFailure("FoundationDB future identity is invalid")
+        }
+        return handle
     }
 }
 
-/// C callback function that bridges to Swift callbacks.
+/// Retains the handler registered for a FoundationDB future's ready event.
+///
+/// FoundationDB owns this registration until the future becomes ready.
+private final class FutureReadinessRegistration: Sendable {
+    /// Handles the transition to the ready state.
+    let handler: @Sendable (FutureHandle?) -> Void
+
+    /// Initializes a ready-state context with its handler.
+    ///
+    /// - Parameter handler: The handler to invoke when the future is ready.
+    init(handler: @escaping @Sendable (FutureHandle?) -> Void) {
+        self.handler = handler
+    }
+}
+
+/// Handles the C future's transition to the ready state.
 ///
 /// This function is called by the FoundationDB C API when a future completes.
-/// It extracts the Swift callback from the userdata and invokes it.
+/// It consumes the retained registration and invokes its ready handler.
 ///
 /// - Parameters:
 ///   - future: The completed C future pointer.
-///   - userdata: Opaque pointer containing the `CallbackBox` instance.
-private func fdbFutureCallback(future: CFuturePtr?, userdata: UnsafeMutableRawPointer?) {
-    guard let userdata, let future = future else { return }
-    let box = Unmanaged<CallbackBox>.fromOpaque(userdata).takeRetainedValue()
-    box.callback(future)
+///   - registration: Retained `FutureReadinessRegistration`.
+@_cdecl("foundationdb_future_did_become_ready")
+private func deliverFutureReadiness(
+    _ future: FutureHandle?,
+    _ registration: UnsafeMutableRawPointer?
+) {
+    guard let registration else { return }
+    let readinessRegistration = Unmanaged<FutureReadinessRegistration>
+        .fromOpaque(registration)
+        .takeRetainedValue()
+    readinessRegistration.handler(future)
+}
+
+/// Creates an immutable view whose owner keeps the FDB future alive.
+///
+/// FoundationDB owns returned pointers until the future is destroyed. Retaining
+/// the future in the returned byte string preserves that lifetime without copying
+/// payload bytes.
+private func futureResultBytes(
+    _ sourceBytes: UnsafePointer<UInt8>?,
+    length: Int32,
+    owner: FutureOwner
+) throws -> FDB.ByteString {
+    guard length >= 0 else {
+        throw FDBError(.invalidAPICall)
+    }
+    guard length > 0 else {
+        return FDB.ByteString(
+            sharing: nil,
+            count: 0,
+            retaining: owner
+        )
+    }
+    guard sourceBytes != nil else {
+        throw FDBError(.invalidAPICall)
+    }
+    return FDB.ByteString(
+        sharing: sourceBytes,
+        count: Int(length),
+        retaining: owner
+    )
 }
 
 /// A result type for futures that return no data (void operations).
 ///
 /// Used for operations like transaction commits that complete successfully
 /// but don't return any specific value.
-struct ResultVoid: FutureResult {
+struct CompletionResultDecoder: ResultDecoder {
     /// Extracts a void result from the future (always succeeds if no error).
     ///
-    /// - Parameter fromFuture: The C future to check for errors.
-    /// - Returns: A `ResultVoid` instance if successful.
+    /// - Parameter future: The C future to check for errors.
+    /// - Returns: Nothing after successful completion.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self? {
-        let err = fdb_future_get_error(fromFuture)
-        if err != 0 {
-            throw FDBError(code: err)
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws {
+        _ = owner
+        let errorCode = fdb_future_get_error(future)
+        if errorCode != 0 {
+            throw FDBError(code: errorCode)
         }
 
-        return Self()
     }
 }
 
 /// A result type for futures that return version numbers.
 ///
 /// Used for operations that return transaction version stamps or read versions.
-struct ResultVersion: FutureResult {
-    /// The extracted version value.
-    let value: FDB.Version
-
+struct VersionResultDecoder: ResultDecoder {
     /// Extracts a version from the future.
     ///
-    /// - Parameter fromFuture: The C future containing the version.
-    /// - Returns: A `ResultVersion` with the extracted version.
+    /// - Parameter future: The C future containing the version.
+    /// - Returns: The extracted FoundationDB version.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self? {
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> FDB.Version {
+        _ = owner
         var version: FDB.Version = 0
-        let err = fdb_future_get_int64(fromFuture, &version)
-        if err != 0 {
-            throw FDBError(code: err)
+        let errorCode = fdb_future_get_int64(future, &version)
+        if errorCode != 0 {
+            throw FDBError(code: errorCode)
         }
-        return Self(value: version)
+        return version
     }
 }
 
 /// A result type for futures that return 64-bit integer values.
 ///
 /// Used for operations that return size estimates or counts.
-struct ResultInt64: FutureResult {
-    /// The extracted integer value.
-    let value: Int64
-
+struct Int64ResultDecoder: ResultDecoder {
     /// Extracts an Int64 from the future.
     ///
-    /// - Parameter fromFuture: The C future containing the integer.
-    /// - Returns: A `ResultInt64` with the extracted value.
+    /// - Parameter future: The C future containing the integer.
+    /// - Returns: The extracted integer.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self? {
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> Int64 {
+        _ = owner
         var value: Int64 = 0
-        let err = fdb_future_get_int64(fromFuture, &value)
-        if err != 0 {
-            throw FDBError(code: err)
+        let errorCode = fdb_future_get_int64(future, &value)
+        if errorCode != 0 {
+            throw FDBError(code: errorCode)
         }
-        return Self(value: value)
+        return value
     }
 }
 
 /// A result type for futures that return key data.
 ///
 /// Used for operations like key selectors that resolve to actual keys.
-struct ResultKey: FutureResult {
-    /// The extracted key, or nil if no key was returned.
-    let value: FDB.Bytes?
-
+struct KeyResultDecoder: ResultDecoder {
     /// Extracts a key from the future.
     ///
-    /// - Parameter fromFuture: The C future containing the key data.
-    /// - Returns: A `ResultKey` with the extracted key, or nil if no key present.
+    /// - Parameter future: The C future containing the key data.
+    /// - Returns: An owner-backed view of the extracted key.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self? {
-        var keyPtr: UnsafePointer<UInt8>?
-        var keyLen: Int32 = 0
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> FDB.ByteString {
+        var keyStorage: UnsafePointer<UInt8>?
+        var keyLength: Int32 = 0
 
-        let err = fdb_future_get_key(fromFuture, &keyPtr, &keyLen)
-        if err != 0 {
-            throw FDBError(code: err)
+        let errorCode = fdb_future_get_key(future, &keyStorage, &keyLength)
+        if errorCode != 0 {
+            throw FDBError(code: errorCode)
         }
 
-        if let keyPtr {
-            let key = Array(UnsafeBufferPointer(start: keyPtr, count: Int(keyLen)))
-            return Self(value: key)
-        }
-
-        return Self(value: nil)
+        return try futureResultBytes(
+            keyStorage,
+            length: keyLength,
+            owner: owner
+        )
     }
 }
 
 /// A result type for futures that return value data.
 ///
 /// Used for get operations that retrieve values associated with keys.
-struct ResultValue: FutureResult {
-    /// The extracted value, or nil if no value was found.
-    let value: FDB.Bytes?
-
+struct ValueResultDecoder: ResultDecoder {
     /// Extracts a value from the future.
     ///
-    /// - Parameter fromFuture: The C future containing the value data.
-    /// - Returns: A `ResultValue` with the extracted value, or nil if not present.
+    /// - Parameter future: The C future containing the value data.
+    /// - Returns: An owner-backed value view, or `nil` when no value exists.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self? {
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> FDB.ByteString? {
         var present: Int32 = 0
-        var valPtr: UnsafePointer<UInt8>?
-        var valLen: Int32 = 0
+        var valueStorage: UnsafePointer<UInt8>?
+        var valueLength: Int32 = 0
 
-        let err = fdb_future_get_value(fromFuture, &present, &valPtr, &valLen)
-        if err != 0 {
-            throw FDBError(code: err)
+        let errorCode = fdb_future_get_value(
+            future,
+            &present,
+            &valueStorage,
+            &valueLength
+        )
+        if errorCode != 0 {
+            throw FDBError(code: errorCode)
         }
 
-        if present != 0, let valPtr {
-            let value = Array(UnsafeBufferPointer(start: valPtr, count: Int(valLen)))
-            return Self(value: value)
+        if present != 0 {
+            return try futureResultBytes(
+                valueStorage,
+                length: valueLength,
+                owner: owner
+            )
         }
 
-        return Self(value: nil)
+        return nil
     }
 }
 
@@ -257,76 +383,126 @@ struct ResultValue: FutureResult {
 ///
 /// Used for range operations that retrieve multiple key-value pairs along
 /// with information about whether more data is available.
-public struct ResultRange: FutureResult {
+public struct RangeBatch: Sendable {
     /// The array of key-value pairs returned by the range operation.
+    ///
+    /// Records decoded from a FoundationDB future are zero-copy views. Keeping
+    /// any record alive retains the complete FoundationDB range result. Long-lived
+    /// consumers should call `copyBytes()` at their explicit ownership boundary.
     public let records: FDB.KeyValueArray
 
     /// Indicates whether there are more records beyond this result.
-    public let more: Bool
+    public let hasMore: Bool
 
+    /// Creates an owned range result.
+    ///
+    /// This initializer is useful for transaction implementations that already
+    /// own their key/value records and therefore do not decode an FDB future.
+    public init(records: FDB.KeyValueArray, hasMore: Bool) {
+        self.records = records
+        self.hasMore = hasMore
+    }
+}
+
+/// Decodes a FoundationDB range future into owner-backed row views.
+struct RangeBatchResultDecoder: ResultDecoder {
     /// Extracts key-value pairs from a range future.
     ///
-    /// - Parameter fromFuture: The C future containing the key-value array.
-    /// - Returns: A `ResultRange` with the extracted records and more flag.
+    /// - Parameter future: The C future containing the key-value array.
+    /// - Returns: A `RangeBatch` with the extracted records and has-more flag.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self? {
-        var kvPtr: UnsafePointer<FDBKeyValue>?
-        var count: Int32 = 0
-        var more: Int32 = 0
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> RangeBatch {
+        var sourceRecords: UnsafePointer<FDBKeyValue>?
+        var recordCount: Int32 = 0
+        var hasMore: Int32 = 0
 
-        let err = fdb_future_get_keyvalue_array(fromFuture, &kvPtr, &count, &more)
-        if err != 0 {
-            throw FDBError(code: err)
+        let errorCode = fdb_future_get_keyvalue_array(
+            future,
+            &sourceRecords,
+            &recordCount,
+            &hasMore
+        )
+        if errorCode != 0 {
+            throw FDBError(code: errorCode)
         }
 
-        guard let kvPtr = kvPtr, count > 0 else {
-            return nil
+        guard recordCount >= 0 else {
+            throw FDBError(.invalidAPICall)
+        }
+        guard recordCount > 0 else {
+            return RangeBatch(records: [], hasMore: hasMore != 0)
+        }
+        guard let sourceRecords else {
+            throw FDBError(.invalidAPICall)
         }
 
         var keyValueArray: FDB.KeyValueArray = []
-        for i in 0 ..< Int(count) {
-            let kv = kvPtr[i]
-            let key = Array(UnsafeBufferPointer(start: kv.key, count: Int(kv.key_length)))
-            let value = Array(UnsafeBufferPointer(start: kv.value, count: Int(kv.value_length)))
+        keyValueArray.reserveCapacity(Int(recordCount))
+        for index in 0 ..< Int(recordCount) {
+            let sourceRecord = sourceRecords[index]
+            let key = try futureResultBytes(
+                sourceRecord.key,
+                length: sourceRecord.key_length,
+                owner: owner
+            )
+            let value = try futureResultBytes(
+                sourceRecord.value,
+                length: sourceRecord.value_length,
+                owner: owner
+            )
             keyValueArray.append((key, value))
         }
 
-        return Self(records: keyValueArray, more: more > 0)
+        return RangeBatch(records: keyValueArray, hasMore: hasMore != 0)
     }
 }
 
 /// A result type for futures that return arrays of keys.
 ///
 /// Used for operations like get range split points that return multiple keys.
-struct ResultKeyArray: FutureResult {
-    /// The array of keys returned by the operation.
-    let value: [[UInt8]]
-
+struct KeyCollectionResultDecoder: ResultDecoder {
     /// Extracts an array of keys from the future.
     ///
-    /// - Parameter fromFuture: The C future containing the key array.
-    /// - Returns: A `ResultKeyArray` with the extracted keys.
+    /// - Parameter future: The C future containing the key array.
+    /// - Returns: Owner-backed views of the extracted keys.
     /// - Throws: `FDBError` if the future contains an error.
-    static func extract(fromFuture: CFuturePtr) throws -> Self? {
-        var keysPtr: UnsafePointer<FDBKey>?
-        var count: Int32 = 0
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> [FDB.ByteString] {
+        var sourceKeys: UnsafePointer<FDBKey>?
+        var keyCount: Int32 = 0
 
-        let err = fdb_future_get_key_array(fromFuture, &keysPtr, &count)
-        if err != 0 {
-            throw FDBError(code: err)
+        let errorCode = fdb_future_get_key_array(future, &sourceKeys, &keyCount)
+        if errorCode != 0 {
+            throw FDBError(code: errorCode)
         }
 
-        guard let keysPtr = keysPtr, count > 0 else {
-            return Self(value: [])
+        guard keyCount >= 0 else {
+            throw FDBError(.invalidAPICall)
+        }
+        guard keyCount > 0 else {
+            return []
+        }
+        guard let sourceKeys else {
+            throw FDBError(.invalidAPICall)
         }
 
-        var keyArray: [[UInt8]] = []
-        for i in 0 ..< Int(count) {
-            let fdbKey = keysPtr[i]
-            let key = Array(UnsafeBufferPointer(start: fdbKey.key, count: Int(fdbKey.key_length)))
+        var keyArray: [FDB.ByteString] = []
+        keyArray.reserveCapacity(Int(keyCount))
+        for index in 0 ..< Int(keyCount) {
+            let sourceKey = sourceKeys[index]
+            let key = try futureResultBytes(
+                sourceKey.key,
+                length: sourceKey.key_length,
+                owner: owner
+            )
             keyArray.append(key)
         }
 
-        return Self(value: keyArray)
+        return keyArray
     }
 }

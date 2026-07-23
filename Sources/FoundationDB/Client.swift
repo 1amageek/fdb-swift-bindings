@@ -77,7 +77,7 @@ public final class FDBClient: Sendable {
     /// - Throws: `FDBError` if the database connection cannot be established.
     public static func openDatabase(clusterFilePath: String? = nil) throws -> FDBDatabase {
         guard FDBNetwork.shared.isInitialized else {
-            throw FDBError(.networkError)
+            throw FDBError(.invalidAPICall)
         }
 
         var database: OpaquePointer?
@@ -87,20 +87,30 @@ public final class FDBClient: Sendable {
         }
 
         guard let db = database else {
-            throw FDBError(.clientError)
+            throw FDBError(.invalidAPICall)
         }
 
         return FDBDatabase(database: db)
     }
 
-    /// Sets a network option with an optional byte array value.
+    /// Sets a network option with a byte payload.
     ///
     /// - Parameters:
-    ///   - value: Optional byte array value for the option.
+    ///   - value: Byte payload for the option.
     ///   - option: The network option to set.
     /// - Throws: `FDBError` if the option cannot be set.
-    public static func setNetworkOption(to value: [UInt8]? = nil, forOption option: FDB.NetworkOption) throws {
+    public static func setNetworkOption<Value: FDB.ByteInput>(
+        to value: Value,
+        forOption option: FDB.NetworkOption
+    ) throws {
         try FDBNetwork.shared.setNetworkOption(to: value, forOption: option)
+    }
+
+    /// Sets a network option that has no value payload.
+    public static func setNetworkOption(
+        forOption option: FDB.NetworkOption
+    ) throws {
+        try FDBNetwork.shared.setNetworkOption(forOption: option)
     }
 
     /// Sets a network option with a string value.

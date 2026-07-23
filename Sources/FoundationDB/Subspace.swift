@@ -243,8 +243,8 @@ public struct Subspace: Sendable {
     ///
     /// // Scan all user keys (safe - tuple-encoded)
     /// let sequence = transaction.getRange(
-    ///     beginKey: begin,
-    ///     endKey: end
+    ///     from: begin,
+    ///     to: end
     /// )
     /// for try await (key, value) in sequence {
     ///     // Process each user key-value pair

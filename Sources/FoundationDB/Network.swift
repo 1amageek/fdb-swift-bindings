@@ -50,11 +50,8 @@ import Synchronization
 /// ```
 final class FDBNetwork: Sendable {
 
-    /// Internal lifecycle state.
-    ///
-    /// `@unchecked Sendable` because `pthread_t` is not `Sendable`,
-    /// but all access is guarded by `Mutex`.
-    private struct State: @unchecked Sendable {
+    /// Internal lifecycle state. All access is guarded by `state`.
+    private struct State {
         var phase: Phase = .uninitialized
         var databaseCount: Int = 0
         var networkThread: pthread_t? = nil
@@ -84,12 +81,14 @@ final class FDBNetwork: Sendable {
         try state.withLock { state in
             switch state.phase {
             case .uninitialized:
-                try selectAPIVersion(Int32(version))
+                try selectAPIVersion(
+                    validatedParameter(version, named: "apiVersion")
+                )
                 try setupNetwork()
                 startNetwork(state: &state)
                 state.phase = .running
             case .running:
-                throw FDBError(.networkError)
+                throw FDBError(.invalidAPICall)
             case .stopped:
                 fatalError(
                     "FDB network cannot be restarted after shutdown. "
@@ -179,25 +178,36 @@ final class FDBNetwork: Sendable {
 
     // MARK: - Network Options
 
-    /// Sets a network option with an optional byte array value.
+    /// Sets a network option with a byte payload.
     ///
     /// - Parameters:
-    ///   - value: Optional byte array value for the option.
+    ///   - value: Byte payload for the option.
     ///   - option: The network option to set.
     /// - Throws: `FDBError` if the option cannot be set.
-    func setNetworkOption(to value: [UInt8]? = nil, forOption option: FDB.NetworkOption) throws {
-        let error: Int32
-        if let value = value {
-            error = value.withUnsafeBytes { bytes in
-                fdb_network_set_option(
-                    FDBNetworkOption(option.rawValue),
-                    bytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(value.count)
-                )
-            }
-        } else {
-            error = fdb_network_set_option(FDBNetworkOption(option.rawValue), nil, 0)
+    func setNetworkOption<Value: FDB.ByteInput>(
+        to value: Value,
+        forOption option: FDB.NetworkOption
+    ) throws {
+        let error = try withInputBytes(value) { bytes, length in
+            fdb_network_set_option(
+                FDBNetworkOption(option.rawValue),
+                bytes,
+                length
+            )
         }
+
+        if error != 0 {
+            throw FDBError(code: error)
+        }
+    }
+
+    /// Sets a network option that has no value payload.
+    func setNetworkOption(forOption option: FDB.NetworkOption) throws {
+        let error = fdb_network_set_option(
+            FDBNetworkOption(option.rawValue),
+            nil,
+            0
+        )
 
         if error != 0 {
             throw FDBError(code: error)

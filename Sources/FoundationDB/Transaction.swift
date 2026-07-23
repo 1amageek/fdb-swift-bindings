@@ -19,96 +19,115 @@
  */
 import CFoundationDB
 
-public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
-    private let transaction: OpaquePointer
+public final class FDBTransaction: TransactionProtocol, Sendable {
+    private let transactionAddress: UInt
 
     init(transaction: OpaquePointer) {
-        self.transaction = transaction
+        self.transactionAddress = UInt(bitPattern: transaction)
     }
 
     deinit {
         fdb_transaction_destroy(transaction)
     }
 
-    public func getValue(for key: FDB.Bytes, snapshot: Bool) async throws -> FDB.Bytes? {
-        try await key.withUnsafeBytes { keyBytes in
-            Future<ResultValue>(
+    private var transaction: OpaquePointer {
+        guard let transaction = OpaquePointer(bitPattern: transactionAddress) else {
+            preconditionFailure("FoundationDB transaction pointer address is invalid")
+        }
+        return transaction
+    }
+
+    public func getValue<Key: FDB.ByteInput>(
+        for key: Key,
+        snapshot: Bool
+    ) async throws -> FDB.ByteString? {
+        let future = try withInputBytes(key) { keyBytes, keyLength in
+            Future<ValueResultDecoder>(
                 fdb_transaction_get(
                     transaction,
-                    keyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(key.count),
+                    keyBytes,
+                    keyLength,
                     snapshot ? 1 : 0
                 )
             )
-        }.getAsync()?.value
+        }
+        return try await future.value
     }
 
-    public func setValue(_ value: FDB.Bytes, for key: FDB.Bytes) {
-        key.withUnsafeBytes { keyBytes in
-            value.withUnsafeBytes { valueBytes in
+    public func setValue<Value: FDB.ByteInput, Key: FDB.ByteInput>(
+        _ value: Value,
+        for key: Key
+    ) throws {
+        try withInputBytes(key) { keyBytes, keyLength in
+            try withInputBytes(value) { valueBytes, valueLength in
                 fdb_transaction_set(
                     transaction,
-                    keyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(key.count),
-                    valueBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(value.count)
+                    keyBytes,
+                    keyLength,
+                    valueBytes,
+                    valueLength
                 )
             }
         }
     }
 
-    public func clear(key: FDB.Bytes) {
-        key.withUnsafeBytes { keyBytes in
+    public func clear<Key: FDB.ByteInput>(key: Key) throws {
+        try withInputBytes(key) { keyBytes, keyLength in
             fdb_transaction_clear(
                 transaction,
-                keyBytes.bindMemory(to: UInt8.self).baseAddress,
-                Int32(key.count)
+                keyBytes,
+                keyLength
             )
         }
     }
 
-    public func clearRange(beginKey: FDB.Bytes, endKey: FDB.Bytes) {
-        beginKey.withUnsafeBytes { beginKeyBytes in
-            endKey.withUnsafeBytes { endKeyBytes in
+    public func clearRange<Begin: FDB.ByteInput, End: FDB.ByteInput>(
+        beginKey: Begin,
+        endKey: End
+    ) throws {
+        try withInputBytes(beginKey) { beginKeyBytes, beginKeyLength in
+            try withInputBytes(endKey) { endKeyBytes, endKeyLength in
                 fdb_transaction_clear_range(
                     transaction,
-                    beginKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(beginKey.count),
-                    endKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(endKey.count)
+                    beginKeyBytes,
+                    beginKeyLength,
+                    endKeyBytes,
+                    endKeyLength
                 )
             }
         }
     }
 
-    public func atomicOp(key: FDB.Bytes, param: FDB.Bytes, mutationType: FDB.MutationType) {
-        key.withUnsafeBytes { keyBytes in
-            param.withUnsafeBytes { paramBytes in
+    public func atomicOp<Key: FDB.ByteInput, Parameter: FDB.ByteInput>(
+        key: Key,
+        param: Parameter,
+        mutationType: FDB.MutationType
+    ) throws {
+        try withInputBytes(key) { keyBytes, keyLength in
+            try withInputBytes(param) { paramBytes, parameterLength in
                 fdb_transaction_atomic_op(
                     transaction,
-                    keyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(key.count),
-                    paramBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(param.count),
+                    keyBytes,
+                    keyLength,
+                    paramBytes,
+                    parameterLength,
                     FDBMutationType(mutationType.rawValue)
                 )
             }
         }
     }
 
-    public func setOption(to value: FDB.Bytes?, forOption option: FDB.TransactionOption) throws {
-        let error: Int32
-        if let value = value {
-            error = value.withUnsafeBytes { bytes in
-                fdb_transaction_set_option(
-                    transaction,
-                    FDBTransactionOption(option.rawValue),
-                    bytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(value.count)
-                )
-            }
-        } else {
-            error = fdb_transaction_set_option(transaction, FDBTransactionOption(option.rawValue), nil, 0)
+    public func setOption<Value: FDB.ByteInput>(
+        to value: Value,
+        forOption option: FDB.TransactionOption
+    ) throws {
+        let error = try withInputBytes(value) { bytes, length in
+            fdb_transaction_set_option(
+                transaction,
+                FDBTransactionOption(option.rawValue),
+                bytes,
+                length
+            )
         }
 
         if error != 0 {
@@ -116,35 +135,59 @@ public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
         }
     }
 
-    public func getKey(selector: FDB.KeySelector, snapshot: Bool) async throws -> FDB.Bytes? {
-        try await selector.key.withUnsafeBytes { keyBytes in
-            Future<ResultKey>(
+    public func setOption(forOption option: FDB.TransactionOption) throws {
+        let error = fdb_transaction_set_option(
+            transaction,
+            FDBTransactionOption(option.rawValue),
+            nil,
+            0
+        )
+
+        if error != 0 {
+            throw FDBError(code: error)
+        }
+    }
+
+    public func getKey(
+        selector: FDB.KeySelector,
+        snapshot: Bool
+    ) async throws -> FDB.ByteString? {
+        let offset = try validatedParameter(
+            selector.offset,
+            named: "selector.offset"
+        )
+        let future = try withInputBytes(
+            selector.key
+        ) { keyBytes, keyLength in
+            Future<KeyResultDecoder>(
                 fdb_transaction_get_key(
                     transaction,
-                    keyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(selector.key.count),
+                    keyBytes,
+                    keyLength,
                     selector.orEqual ? 1 : 0,
-                    Int32(selector.offset),
+                    offset,
                     snapshot ? 1 : 0
                 )
             )
-        }.getAsync()?.value
+        }
+        return try await future.value
     }
 
     public func commit() async throws -> Bool {
-        try await Future<ResultVoid>(
+        _ = try await Future<CompletionResultDecoder>(
             fdb_transaction_commit(transaction)
-        ).getAsync() != nil
+        ).value
+        return true
     }
 
     public func cancel() {
         fdb_transaction_cancel(transaction)
     }
 
-    public func getVersionstamp() async throws -> FDB.Bytes? {
-        try await Future<ResultKey>(
+    public func getVersionstamp() async throws -> FDB.ByteString? {
+        try await Future<KeyResultDecoder>(
             fdb_transaction_get_versionstamp(transaction)
-        ).getAsync()?.value
+        ).value
     }
 
     public func setReadVersion(_ version: FDB.Version) {
@@ -152,48 +195,64 @@ public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
     }
 
     public func getReadVersion() async throws -> FDB.Version {
-        try await Future<ResultVersion>(
+        try await Future<VersionResultDecoder>(
             fdb_transaction_get_read_version(transaction)
-        ).getAsync()?.value ?? 0
+        ).value
     }
 
     public func onError(_ error: FDBError) async throws {
-        _ = try await Future<ResultVoid>(
+        _ = try await Future<CompletionResultDecoder>(
             fdb_transaction_on_error(transaction, error.code)
-        ).getAsync()
+        ).value
     }
 
-    public func getEstimatedRangeSizeBytes(beginKey: FDB.Bytes, endKey: FDB.Bytes) async throws -> Int {
-        try Int(await beginKey.withUnsafeBytes { beginKeyBytes in
-            endKey.withUnsafeBytes { endKeyBytes in
-                Future<ResultInt64>(
+    public func getEstimatedRangeSizeBytes<
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
+    >(beginKey: Begin, endKey: End) async throws -> Int {
+        let future = try withInputBytes(
+            beginKey
+        ) { beginKeyBytes, beginKeyLength in
+            try withInputBytes(endKey) { endKeyBytes, endKeyLength in
+                Future<Int64ResultDecoder>(
                     fdb_transaction_get_estimated_range_size_bytes(
                         transaction,
-                        beginKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(beginKey.count),
-                        endKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(endKey.count)
+                        beginKeyBytes,
+                        beginKeyLength,
+                        endKeyBytes,
+                        endKeyLength
                     )
                 )
             }
-        }.getAsync()?.value ?? 0)
+        }
+        return try Int(await future.value)
     }
 
-    public func getRangeSplitPoints(beginKey: FDB.Bytes, endKey: FDB.Bytes, chunkSize: Int) async throws -> [[UInt8]] {
-        try await beginKey.withUnsafeBytes { beginKeyBytes in
-            endKey.withUnsafeBytes { endKeyBytes in
-                Future<ResultKeyArray>(
+    public func getRangeSplitPoints<
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
+    >(
+        beginKey: Begin,
+        endKey: End,
+        chunkSize: Int
+    ) async throws -> [FDB.ByteString] {
+        let future = try withInputBytes(
+            beginKey
+        ) { beginKeyBytes, beginKeyLength in
+            try withInputBytes(endKey) { endKeyBytes, endKeyLength in
+                Future<KeyCollectionResultDecoder>(
                     fdb_transaction_get_range_split_points(
                         transaction,
-                        beginKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(beginKey.count),
-                        endKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(endKey.count),
+                        beginKeyBytes,
+                        beginKeyLength,
+                        endKeyBytes,
+                        endKeyLength,
                         Int64(chunkSize)
                     )
                 )
             }
-        }.getAsync()?.value ?? []
+        }
+        return try await future.value
     }
 
     public func getCommittedVersion() throws -> FDB.Version {
@@ -205,21 +264,30 @@ public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
         return version
     }
 
-    public func getApproximateSize() async throws -> Int {
-        try Int(await Future<ResultInt64>(
+    public func approximateSize() async throws -> Int64 {
+        try await Future<Int64ResultDecoder>(
             fdb_transaction_get_approximate_size(transaction)
-        ).getAsync()?.value ?? 0)
+        ).value
     }
 
-    public func addConflictRange(beginKey: FDB.Bytes, endKey: FDB.Bytes, type: FDB.ConflictRangeType) throws {
-        let error = beginKey.withUnsafeBytes { beginKeyBytes in
-            endKey.withUnsafeBytes { endKeyBytes in
+    public func addConflictRange<
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
+    >(
+        beginKey: Begin,
+        endKey: End,
+        type: FDB.ConflictRangeType
+    ) throws {
+        let error = try withInputBytes(
+            beginKey
+        ) { beginKeyBytes, beginKeyLength in
+            try withInputBytes(endKey) { endKeyBytes, endKeyLength in
                 fdb_transaction_add_conflict_range(
                     transaction,
-                    beginKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(beginKey.count),
-                    endKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(endKey.count),
+                    beginKeyBytes,
+                    beginKeyLength,
+                    endKeyBytes,
+                    endKeyLength,
                     FDBConflictRangeType(rawValue: type.rawValue)
                 )
             }
@@ -230,33 +298,52 @@ public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
         }
     }
 
-    public func getRangeNative(
-        beginSelector: FDB.KeySelector,
-        endSelector: FDB.KeySelector,
+    public func readRangeBatch(
+        from begin: FDB.KeySelector,
+        to end: FDB.KeySelector,
         limit: Int,
         targetBytes: Int,
         streamingMode: FDB.StreamingMode,
         iteration: Int,
         reverse: Bool,
         snapshot: Bool
-    ) async throws -> ResultRange {
-        let future = beginSelector.key.withUnsafeBytes { beginKeyBytes in
-            endSelector.key.withUnsafeBytes { endKeyBytes in
-                Future<ResultRange>(
+    ) async throws -> RangeBatch {
+        let beginOffset = try validatedParameter(
+            begin.offset,
+            named: "begin.offset"
+        )
+        let endOffset = try validatedParameter(
+            end.offset,
+            named: "end.offset"
+        )
+        let rowLimit = try validatedParameter(limit, named: "limit")
+        let byteTarget = try validatedParameter(
+            targetBytes,
+            named: "targetBytes"
+        )
+        let iteration = try validatedParameter(
+            iteration,
+            named: "iteration"
+        )
+        let future = try withInputBytes(
+            begin.key
+        ) { beginKeyBytes, beginKeyLength in
+            try withInputBytes(end.key) { endKeyBytes, endKeyLength in
+                Future<RangeBatchResultDecoder>(
                     fdb_transaction_get_range(
                         transaction,
-                        beginKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(beginSelector.key.count),
-                        beginSelector.orEqual ? 1 : 0,
-                        Int32(beginSelector.offset),
-                        endKeyBytes.bindMemory(to: UInt8.self).baseAddress,
-                        Int32(endSelector.key.count),
-                        endSelector.orEqual ? 1 : 0,
-                        Int32(endSelector.offset),
-                        Int32(limit),
-                        Int32(targetBytes),
+                        beginKeyBytes,
+                        beginKeyLength,
+                        begin.orEqual ? 1 : 0,
+                        beginOffset,
+                        endKeyBytes,
+                        endKeyLength,
+                        end.orEqual ? 1 : 0,
+                        endOffset,
+                        rowLimit,
+                        byteTarget,
                         FDBStreamingMode(streamingMode.rawValue),
-                        Int32(iteration),
+                        iteration,
                         snapshot ? 1 : 0,
                         reverse ? 1 : 0
                     )
@@ -264,6 +351,6 @@ public final class FDBTransaction: TransactionProtocol, @unchecked Sendable {
             }
         }
 
-        return try await future.getAsync() ?? ResultRange(records: [], more: false)
+        return try await future.value
     }
 }

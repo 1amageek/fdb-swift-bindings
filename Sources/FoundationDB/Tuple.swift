@@ -20,11 +20,14 @@
 
 import Foundation
 
-public enum TupleError: Error, Sendable {
+public enum TupleError: Error, Sendable, Equatable {
     case invalidTupleElement
     case invalidEncoding
     case invalidDecoding(String)
     case unsupportedType
+    case missingIncompleteVersionstamp
+    case multipleIncompleteVersionstamps
+    case versionstampOffsetOverflow(Int)
 }
 
 enum TupleTypeCode: UInt8, CaseIterable {
@@ -264,7 +267,10 @@ extension String: TupleElement {
             }
         }
 
-        return String(bytes: decoded, encoding: .utf8)!
+        guard let value = String(bytes: decoded, encoding: .utf8) else {
+            throw TupleError.invalidDecoding("String contains invalid UTF-8")
+        }
+        return value
     }
 }
 
@@ -337,16 +343,20 @@ extension Float: TupleElement {
     }
 
     public static func decodeTuple(from bytes: FDB.Bytes, at offset: inout Int) throws -> Float {
-        guard offset + 4 <= bytes.count else {
+        let byteCount = MemoryLayout<UInt32>.size
+        guard offset >= 0,
+              offset <= bytes.count,
+              bytes.count - offset >= byteCount else {
             throw TupleError.invalidDecoding("Not enough bytes for Float")
         }
 
-        let floatBytes = Array(bytes[offset ..< offset + 4])
-        offset += 4
-
-        let bigEndianValue = floatBytes.withUnsafeBytes { bytes in
-            bytes.load(as: UInt32.self)
+        let bigEndianValue = bytes.withUnsafeBytes { rawBytes in
+            rawBytes.loadUnaligned(
+                fromByteOffset: offset,
+                as: UInt32.self
+            )
         }
+        offset += byteCount
         let bitPattern = UInt32(bigEndian: bigEndianValue)
         return Float(bitPattern: bitPattern)
     }
@@ -362,16 +372,20 @@ extension Double: TupleElement {
     }
 
     public static func decodeTuple(from bytes: FDB.Bytes, at offset: inout Int) throws -> Double {
-        guard offset + 8 <= bytes.count else {
+        let byteCount = MemoryLayout<UInt64>.size
+        guard offset >= 0,
+              offset <= bytes.count,
+              bytes.count - offset >= byteCount else {
             throw TupleError.invalidDecoding("Not enough bytes for Double")
         }
 
-        let doubleBytes = Array(bytes[offset ..< offset + 8])
-        offset += 8
-
-        let bigEndianValue = doubleBytes.withUnsafeBytes { bytes in
-            bytes.load(as: UInt64.self)
+        let bigEndianValue = bytes.withUnsafeBytes { rawBytes in
+            rawBytes.loadUnaligned(
+                fromByteOffset: offset,
+                as: UInt64.self
+            )
         }
+        offset += byteCount
         let bitPattern = UInt64(bigEndian: bigEndianValue)
         return Double(bitPattern: bitPattern)
     }
@@ -388,19 +402,20 @@ extension UUID: TupleElement {
     }
 
     public static func decodeTuple(from bytes: FDB.Bytes, at offset: inout Int) throws -> UUID {
-        guard offset + 16 <= bytes.count else {
+        let byteCount = 16
+        guard offset >= 0,
+              offset <= bytes.count,
+              bytes.count - offset >= byteCount else {
             throw TupleError.invalidDecoding("Not enough bytes for UUID")
         }
 
-        let uuidBytes = Array(bytes[offset ..< offset + 16])
-        offset += 16
-
         let uuidTuple = (
-            uuidBytes[0], uuidBytes[1], uuidBytes[2], uuidBytes[3],
-            uuidBytes[4], uuidBytes[5], uuidBytes[6], uuidBytes[7],
-            uuidBytes[8], uuidBytes[9], uuidBytes[10], uuidBytes[11],
-            uuidBytes[12], uuidBytes[13], uuidBytes[14], uuidBytes[15]
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            bytes[offset + 8], bytes[offset + 9], bytes[offset + 10], bytes[offset + 11],
+            bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]
         )
+        offset += byteCount
 
         return UUID(uuid: uuidTuple)
     }
@@ -490,7 +505,7 @@ extension Int64: TupleElement {
     }
 
     public static func decodeTuple(from bytes: FDB.Bytes, at offset: inout Int) throws -> Int64 {
-        guard offset > 0 else {
+        guard offset > 0, offset <= bytes.count else {
             throw TupleError.invalidDecoding("Int64 decoding requires type code")
         }
         let typeCode = bytes[offset - 1]
@@ -506,28 +521,27 @@ extension Int64: TupleElement {
             neg = true
         }
 
-        var bp = [UInt8](repeating: 0, count: 8)
-        bp.replaceSubrange((8 - n) ..< 8, with: bytes[offset ... (offset + n - 1)])
-        offset += n
-
-        var ret: Int64 = 0
-        for byte in bp {
-            ret = (ret << 8) | Int64(byte)
+        guard (1...MemoryLayout<UInt64>.size).contains(n),
+              bytes.count - offset >= n else {
+            throw TupleError.invalidDecoding("Invalid Int64 byte count: \(n)")
         }
+
+        var magnitude: UInt64 = 0
+        for index in offset..<(offset + n) {
+            magnitude = (magnitude << 8) | UInt64(bytes[index])
+        }
+        offset += n
+        let value = Int64(bitPattern: magnitude)
 
         if neg {
             if n == 8 {
-                return ret
+                return value
             } else {
-                return ret - Int64(sizeLimits[n])
+                return value - Int64(sizeLimits[n])
             }
         }
 
-        if ret > 0 {
-            return ret
-        }
-
-        return ret
+        return value
     }
 }
 

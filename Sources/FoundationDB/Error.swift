@@ -19,33 +19,48 @@
  */
 import CFoundationDB
 
-// TODO: These should be auto-generated like other bindings
-enum FDBErrorCode: Int32, CaseIterable {
-    case notCommitted = 1007
-    case transactionTooOld = 1020
-    case futureVersion = 1021
+public enum FDBErrorCode: Int32, CaseIterable, Sendable {
+    case operationTimedOut = 1004
+    case transactionTooOld = 1007
+    case futureVersion = 1009
+    case notCommitted = 1020
+    case commitUnknownResult = 1021
+    case idempotencyStatusUnknown = 1022
     case transactionCancelled = 1025
     case transactionTimedOut = 1031
     case processBehind = 1037
+    case operationCancelled = 1101
     case tagThrottled = 1213
-    case internalError = 2000
-    case networkError = 2201
-    case clientError = 4100
+    case invalidAPICall = 2000
+    case transactionTooLarge = 2101
+    case keyTooLarge = 2102
+    case valueTooLarge = 2103
+    case apiVersionAlreadySet = 2201
+    case internalError = 4100
     case unknownError = 9999
+}
+
+/// Whether replaying a transaction body is known to be safe.
+public enum FDBRetryDisposition: Sendable, Equatable {
+    /// FoundationDB guarantees that the transaction did not commit.
+    case retryableNotCommitted
+
+    /// The transaction may have committed. Replay requires an idempotency
+    /// decision above the binding layer.
+    case maybeCommitted
+
+    /// The error is not retryable by the transaction runner.
+    case never
 }
 
 public struct FDBError: Error, CustomStringConvertible {
     public let code: Int32
 
-    public init(code: Int) {
-        self.code = Int32(code)
-    }
-
-    init(code: Int32) {
+    public init(code: Int32) {
         self.code = code
     }
 
-    init(_ errorCode: FDBErrorCode) {
+    public init(_ errorCode: FDBErrorCode) {
         code = errorCode.rawValue
     }
 
@@ -56,24 +71,21 @@ public struct FDBError: Error, CustomStringConvertible {
         return String(cString: errorCString)
     }
 
-    public var isRetryable: Bool {
-        switch code {
-        case FDBErrorCode.notCommitted.rawValue:
-            return true
-        case FDBErrorCode.transactionTooOld.rawValue:
-            return true
-        case FDBErrorCode.futureVersion.rawValue:
-            return true
-        case FDBErrorCode.transactionCancelled.rawValue:
-            return false
-        case FDBErrorCode.transactionTimedOut.rawValue:
-            return true
-        case FDBErrorCode.processBehind.rawValue:
-            return true
-        case FDBErrorCode.tagThrottled.rawValue:
-            return true
-        default:
-            return false
+    public var knownCode: FDBErrorCode? {
+        FDBErrorCode(rawValue: code)
+    }
+
+    public var retryDisposition: FDBRetryDisposition {
+        if matches(.maybeCommitted) {
+            return .maybeCommitted
         }
+        if matches(.retryableNotCommitted) {
+            return .retryableNotCommitted
+        }
+        return .never
+    }
+
+    private func matches(_ predicate: FDB.ErrorPredicate) -> Bool {
+        fdb_error_predicate(Int32(predicate.rawValue), code) != 0
     }
 }

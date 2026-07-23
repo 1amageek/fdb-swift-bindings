@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 import CFoundationDB
+import Synchronization
 
 /// A FoundationDB database connection.
 ///
@@ -30,15 +31,15 @@ import CFoundationDB
 /// let database = try FDBClient.openDatabase()
 /// let transaction = try database.createTransaction()
 /// ```
-public final class FDBDatabase: DatabaseProtocol {
+public final class FDBDatabase: DatabaseProtocol, Sendable {
     /// The underlying FoundationDB database pointer.
-    private let database: OpaquePointer
+    private let database: Mutex<UInt?>
 
     /// Initializes a new database instance with the given database pointer.
     ///
     /// - Parameter database: The underlying FoundationDB database pointer.
     init(database: OpaquePointer) {
-        self.database = database
+        self.database = Mutex(UInt(bitPattern: database))
         FDBNetwork.shared.trackDatabase()
     }
 
@@ -47,7 +48,13 @@ public final class FDBDatabase: DatabaseProtocol {
     /// Destroys the underlying C database handle first, then notifies
     /// `FDBNetwork` that this database is no longer active.
     deinit {
-        fdb_database_destroy(database)
+        database.withLock { storedAddress in
+            if let address = storedAddress,
+               let database = OpaquePointer(bitPattern: address) {
+                fdb_database_destroy(database)
+                storedAddress = nil
+            }
+        }
         FDBNetwork.shared.releaseDatabase()
     }
 
@@ -59,17 +66,24 @@ public final class FDBDatabase: DatabaseProtocol {
     /// - Returns: A new transaction instance conforming to `TransactionProtocol`.
     /// - Throws: `FDBError` if the transaction cannot be created.
     public func createTransaction() throws -> FDBTransaction {
-        var transaction: OpaquePointer?
-        let error = fdb_database_create_transaction(database, &transaction)
-        if error != 0 {
-            throw FDBError(code: error)
+        let result: (error: Int32, address: UInt?) = database.withLock { address in
+            guard let address, let database = OpaquePointer(bitPattern: address) else {
+                return (FDBErrorCode.internalError.rawValue, nil)
+            }
+            var transaction: OpaquePointer?
+            let error = fdb_database_create_transaction(database, &transaction)
+            return (error, transaction.map(UInt.init(bitPattern:)))
+        }
+        if result.error != 0 {
+            throw FDBError(code: result.error)
         }
 
-        guard let tr = transaction else {
+        guard let address = result.address,
+              let transaction = OpaquePointer(bitPattern: address) else {
             throw FDBError(.internalError)
         }
 
-        return FDBTransaction(transaction: tr)
+        return FDBTransaction(transaction: transaction)
     }
 
     /// Sets a database option with a byte array value.
@@ -78,19 +92,42 @@ public final class FDBDatabase: DatabaseProtocol {
     ///   - value: The value for the option (optional).
     ///   - option: The database option to set.
     /// - Throws: `FDBError` if the option cannot be set.
-    public func setOption(to value: FDB.Bytes? = nil, forOption option: FDB.DatabaseOption) throws {
-        let error: Int32
-        if let value = value {
-            error = value.withUnsafeBytes { bytes in
-                fdb_database_set_option(
+    public func setOption<Value: FDB.ByteInput>(
+        to value: Value,
+        forOption option: FDB.DatabaseOption
+    ) throws {
+        let error = try withInputBytes(value) { bytes, length in
+            database.withLock { address -> Int32 in
+                guard let address,
+                      let database = OpaquePointer(bitPattern: address) else {
+                    return FDBErrorCode.internalError.rawValue
+                }
+                return fdb_database_set_option(
                     database,
                     FDBDatabaseOption(option.rawValue),
-                    bytes.bindMemory(to: UInt8.self).baseAddress,
-                    Int32(value.count)
+                    bytes,
+                    length
                 )
             }
-        } else {
-            error = fdb_database_set_option(database, FDBDatabaseOption(option.rawValue), nil, 0)
+        }
+
+        if error != 0 {
+            throw FDBError(code: error)
+        }
+    }
+
+    public func setOption(forOption option: FDB.DatabaseOption) throws {
+        let error = database.withLock { address -> Int32 in
+            guard let address,
+                  let database = OpaquePointer(bitPattern: address) else {
+                return FDBErrorCode.internalError.rawValue
+            }
+            return fdb_database_set_option(
+                database,
+                FDBDatabaseOption(option.rawValue),
+                nil,
+                0
+            )
         }
 
         if error != 0 {

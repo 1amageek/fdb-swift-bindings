@@ -151,6 +151,28 @@ struct VersionstampTests {
         #expect(offset == 13)
     }
 
+    @Test("Versionstamp tuple decoding rejects invalid offsets")
+    func testDecodeTupleInvalidOffsets() {
+        let encoded = Versionstamp.incomplete().encodeTuple()
+        var negativeOffset = -1
+        #expect(throws: TupleError.self) {
+            _ = try Versionstamp.decodeTuple(
+                from: encoded,
+                at: &negativeOffset
+            )
+        }
+        #expect(negativeOffset == -1)
+
+        var overflowingOffset = Int.max
+        #expect(throws: TupleError.self) {
+            _ = try Versionstamp.decodeTuple(
+                from: encoded,
+                at: &overflowingOffset
+            )
+        }
+        #expect(overflowingOffset == Int.max)
+    }
+
     // MARK: - Tuple.packWithVersionstamp() Tests
 
     @Test("Tuple packWithVersionstamp basic")
@@ -171,7 +193,7 @@ struct VersionstampTests {
         let offsetBytes = Array(packed.suffix(4))
         #expect(offsetBytes.count == 4, "Offset must be exactly 4 bytes")
 
-        let offset = offsetBytes.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+        let offset = offsetBytes.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
 
         // Offset should point to the start of the 10-byte transaction version
         // (after type code 0x33)
@@ -195,7 +217,7 @@ struct VersionstampTests {
         let offsetBytes = Array(packed.suffix(4))
         #expect(offsetBytes.count == 4, "Offset must be exactly 4 bytes")
 
-        let offset = offsetBytes.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+        let offset = offsetBytes.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
 
         // Offset should account for prefix length
         #expect(offset == 3 + 1)  // prefix (3) + type code (1)
@@ -207,11 +229,8 @@ struct VersionstampTests {
         let completeVs = Versionstamp(transactionVersion: trVersion, userVersion: 0)
         let tuple = Tuple("prefix", completeVs)
 
-        do {
+        #expect(throws: TupleError.missingIncompleteVersionstamp) {
             _ = try tuple.packWithVersionstamp()
-            Issue.record("Should throw error when no incomplete versionstamp")
-        } catch {
-            #expect(error is TupleError)
         }
     }
 
@@ -221,42 +240,39 @@ struct VersionstampTests {
         let vs2 = Versionstamp.incomplete(userVersion: 1)
         let tuple = Tuple("prefix", vs1, vs2)
 
-        do {
+        #expect(throws: TupleError.multipleIncompleteVersionstamps) {
             _ = try tuple.packWithVersionstamp()
-            Issue.record("Should throw error when multiple incomplete versionstamps")
-        } catch {
-            #expect(error is TupleError)
         }
     }
 
-    @Test("Tuple hasIncompleteVersionstamp")
-    func testHasIncompleteVersionstamp() {
+    @Test("Tuple containsIncompleteVersionstamp")
+    func tupleReportsWhetherItContainsAnIncompleteVersionstamp() {
         let incompleteVs = Versionstamp.incomplete(userVersion: 0)
         let tuple1 = Tuple("test", incompleteVs)
-        #expect(tuple1.hasIncompleteVersionstamp())
+        #expect(tuple1.containsIncompleteVersionstamp)
 
         let trVersion: [UInt8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]
         let completeVs = Versionstamp(transactionVersion: trVersion, userVersion: 0)
         let tuple2 = Tuple("test", completeVs)
-        #expect(!tuple2.hasIncompleteVersionstamp())
+        #expect(!tuple2.containsIncompleteVersionstamp)
 
         let tuple3 = Tuple("test", "no versionstamp")
-        #expect(!tuple3.hasIncompleteVersionstamp())
+        #expect(!tuple3.containsIncompleteVersionstamp)
     }
 
-    @Test("Tuple countIncompleteVersionstamps")
-    func testCountIncompleteVersionstamps() {
+    @Test("Tuple incompleteVersionstampCount")
+    func tupleReportsItsIncompleteVersionstampCount() {
         let vs1 = Versionstamp.incomplete(userVersion: 0)
         let vs2 = Versionstamp.incomplete(userVersion: 1)
 
         let tuple1 = Tuple(vs1)
-        #expect(tuple1.countIncompleteVersionstamps() == 1)
+        #expect(tuple1.incompleteVersionstampCount == 1)
 
         let tuple2 = Tuple(vs1, "middle", vs2)
-        #expect(tuple2.countIncompleteVersionstamps() == 2)
+        #expect(tuple2.incompleteVersionstampCount == 2)
 
         let tuple3 = Tuple("no versionstamp")
-        #expect(tuple3.countIncompleteVersionstamps() == 0)
+        #expect(tuple3.incompleteVersionstampCount == 0)
     }
 
     @Test("Tuple validateForVersionstamp")
@@ -266,20 +282,14 @@ struct VersionstampTests {
         try tuple1.validateForVersionstamp()  // Should not throw
 
         let tuple2 = Tuple("no versionstamp")
-        do {
+        #expect(throws: TupleError.missingIncompleteVersionstamp) {
             try tuple2.validateForVersionstamp()
-            Issue.record("Should throw when no versionstamp")
-        } catch {
-            #expect(error is TupleError)
         }
 
         let vs2 = Versionstamp.incomplete(userVersion: 1)
         let tuple3 = Tuple(vs, vs2)
-        do {
+        #expect(throws: TupleError.multipleIncompleteVersionstamps) {
             try tuple3.validateForVersionstamp()
-            Issue.record("Should throw when multiple versionstamps")
-        } catch {
-            #expect(error is TupleError)
         }
     }
 
@@ -390,7 +400,7 @@ struct VersionstampTests {
     @Test("Integration: Write and read versionstamped key")
     func testIntegrationWriteReadVersionstampedKey() async throws {
         try await FDBClient.initialize()
-        let database = try FDBClient.openDatabase()
+        let database = try FDBClient.openTestDatabase()
 
         let result = try await database.withTransaction { transaction in
             let vs = Versionstamp.incomplete(userVersion: 0)
@@ -398,7 +408,7 @@ struct VersionstampTests {
             let key = try tuple.packWithVersionstamp()
 
             // Write versionstamped key
-            transaction.atomicOp(
+            try transaction.atomicOp(
                 key: key,
                 param: [],
                 mutationType: .setVersionstampedKey

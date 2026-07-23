@@ -110,7 +110,7 @@ public final class DirectoryLayer: Sendable {
     // MARK: - Properties
 
     /// Database instance
-    nonisolated(unsafe) private let database: any DatabaseProtocol
+    private let database: any DatabaseProtocol
 
     /// Node subspace for directory metadata
     private let nodeSubspace: Subspace
@@ -201,7 +201,7 @@ public final class DirectoryLayer: Sendable {
 
         // Initialize HCA with nodeSubspace["hca"]
         let hcaSubspace = self.rootNode.subspace("hca")
-        self.allocator = HighContentionAllocator(database: database, subspace: hcaSubspace)
+        self.allocator = HighContentionAllocator(subspace: hcaSubspace)
     }
 
     // MARK: - Public Methods
@@ -217,18 +217,33 @@ public final class DirectoryLayer: Sendable {
         path: [String],
         type: DirectoryType? = nil
     ) async throws -> DirectorySubspace {
-        try validatePath(path)
-
         return try await database.withTransaction { transaction in
-            try await self.createOrOpenInternal(
-                transaction: transaction,
+            try await self.createOrOpen(
                 path: path,
                 type: type,
-                prefix: nil,
-                allowCreate: true,
-                allowOpen: true
+                transaction: transaction
             )
         }
+    }
+
+    /// Create or open a directory in a caller-owned transaction.
+    ///
+    /// Directory metadata, prefix allocation, and application writes can use
+    /// one atomic commit boundary through this overload.
+    public func createOrOpen(
+        path: [String],
+        type: DirectoryType? = nil,
+        transaction: any TransactionProtocol
+    ) async throws -> DirectorySubspace {
+        try validateNonRootPath(path)
+        return try await createOrOpenInternal(
+            transaction: transaction,
+            path: path,
+            type: type,
+            prefix: nil,
+            allowCreate: true,
+            allowOpen: true
+        )
     }
 
     /// Create a new directory at the specified path
@@ -244,18 +259,32 @@ public final class DirectoryLayer: Sendable {
         type: DirectoryType? = nil,
         prefix: FDB.Bytes? = nil
     ) async throws -> DirectorySubspace {
-        try validatePath(path)
-
         return try await database.withTransaction { transaction in
-            try await self.createOrOpenInternal(
-                transaction: transaction,
+            try await self.create(
                 path: path,
                 type: type,
                 prefix: prefix,
-                allowCreate: true,
-                allowOpen: false
+                transaction: transaction
             )
         }
+    }
+
+    /// Create a directory in a caller-owned transaction.
+    public func create(
+        path: [String],
+        type: DirectoryType? = nil,
+        prefix: FDB.Bytes? = nil,
+        transaction: any TransactionProtocol
+    ) async throws -> DirectorySubspace {
+        try validateNonRootPath(path)
+        return try await createOrOpenInternal(
+            transaction: transaction,
+            path: path,
+            type: type,
+            prefix: prefix,
+            allowCreate: true,
+            allowOpen: false
+        )
     }
 
     /// Open an existing directory at the specified path
@@ -266,18 +295,28 @@ public final class DirectoryLayer: Sendable {
     public func open(
         path: [String]
     ) async throws -> DirectorySubspace {
-        try validatePath(path)
-
         return try await database.withTransaction { transaction in
-            try await self.createOrOpenInternal(
-                transaction: transaction,
+            try await self.open(
                 path: path,
-                type: nil,
-                prefix: nil,
-                allowCreate: false,
-                allowOpen: true
+                transaction: transaction
             )
         }
+    }
+
+    /// Open an existing directory in a caller-owned transaction.
+    public func open(
+        path: [String],
+        transaction: any TransactionProtocol
+    ) async throws -> DirectorySubspace {
+        try validateNonRootPath(path)
+        return try await createOrOpenInternal(
+            transaction: transaction,
+            path: path,
+            type: nil,
+            prefix: nil,
+            allowCreate: false,
+            allowOpen: true
+        )
     }
 
     /// Move a directory from one path to another
@@ -291,127 +330,143 @@ public final class DirectoryLayer: Sendable {
         oldPath: [String],
         newPath: [String]
     ) async throws -> DirectorySubspace {
-        try validatePath(oldPath)
-        try validatePath(newPath)
-
-        return try await database.withTransaction { transaction in
-            // Check partition ancestors for both paths
-            let oldPartitionAncestor = try await findPartitionAncestor(
-                transaction: transaction,
-                path: oldPath
+        try await database.withTransaction { transaction in
+            try await self.move(
+                oldPath: oldPath,
+                newPath: newPath,
+                transaction: transaction
             )
-            let newPartitionAncestor = try await findPartitionAncestor(
-                transaction: transaction,
-                path: newPath
+        }
+    }
+
+    /// Move a directory in a caller-owned transaction.
+    public func move(
+        oldPath: [String],
+        newPath: [String],
+        transaction: any TransactionProtocol
+    ) async throws -> DirectorySubspace {
+        try validateNonRootPath(oldPath)
+        try validateNonRootPath(newPath)
+
+        // Check partition ancestors for both paths
+        let oldPartitionAncestor = try await findPartitionAncestor(
+            transaction: transaction,
+            path: oldPath
+        )
+        let newPartitionAncestor = try await findPartitionAncestor(
+            transaction: transaction,
+            path: newPath
+        )
+
+        // Check if both paths are in the same partition - if so, delegate to partition layer
+        if let (oldPartitionPath, oldPartitionDir) = oldPartitionAncestor,
+            let (newPartitionPath, _) = newPartitionAncestor,
+            oldPartitionPath == newPartitionPath
+        {
+            // Both paths are in the same partition - delegate to partition layer
+            let oldPathInPartition = Array(oldPath.dropFirst(oldPartitionPath.count))
+            let newPathInPartition = Array(newPath.dropFirst(newPartitionPath.count))
+
+            let partitionLayer = try createPartitionLayer(prefix: oldPartitionDir.prefix)
+            let movedSubspace = try await partitionLayer.move(
+                oldPath: oldPathInPartition,
+                newPath: newPathInPartition,
+                transaction: transaction
             )
 
-            // Check if both paths are in the same partition - if so, delegate to partition layer
-            if let (oldPartitionPath, oldPartitionDir) = oldPartitionAncestor,
-               let (newPartitionPath, _) = newPartitionAncestor,
-               oldPartitionPath == newPartitionPath {
-                // Both paths are in the same partition - delegate to partition layer
-                let oldPathInPartition = Array(oldPath.dropFirst(oldPartitionPath.count))
-                let newPathInPartition = Array(newPath.dropFirst(newPartitionPath.count))
+            // Return with absolute path
+            // BUG FIX: Same double-prefix issue - partition layer already returns absolute prefix
+            return DirectorySubspace(
+                prefix: movedSubspace.prefix,
+                path: newPath,
+                type: movedSubspace.type
+            )
+        }
 
-                let partitionLayer = try createPartitionLayer(prefix: oldPartitionDir.prefix)
-                let movedSubspace = try await partitionLayer.move(
-                    oldPath: oldPathInPartition,
-                    newPath: newPathInPartition
-                )
+        // BUG FIX: Detect cross-partition moves and reject them
+        // If partition ancestors don't match, we cannot move across boundaries
+        if (oldPartitionAncestor != nil || newPartitionAncestor != nil) && oldPartitionAncestor?.0 != newPartitionAncestor?.0 {
+            throw DirectoryError.cannotMoveAcrossPartitions(from: oldPath, to: newPath)
+        }
 
-                // Return with absolute path
-                // BUG FIX: Same double-prefix issue - partition layer already returns absolute prefix
-                return DirectorySubspace(
-                    prefix: movedSubspace.prefix,
-                    path: newPath,
-                    type: movedSubspace.type
-                )
-            }
+        // Use resolve() for unified path resolution
+        guard let oldNode = try await self.resolve(transaction: transaction, path: oldPath) else {
+            throw DirectoryError.directoryNotFound(path: oldPath)
+        }
 
-            // BUG FIX: Detect cross-partition moves and reject them
-            // If partition ancestors don't match, we cannot move across boundaries
-            if (oldPartitionAncestor != nil || newPartitionAncestor != nil) &&
-               oldPartitionAncestor?.0 != newPartitionAncestor?.0 {
-                throw DirectoryError.cannotMoveAcrossPartitions(from: oldPath, to: newPath)
-            }
+        // Check destination doesn't exist
+        if let _ = try await self.resolve(transaction: transaction, path: newPath) {
+            throw DirectoryError.directoryAlreadyExists(path: newPath)
+        }
 
-            // Use resolve() for unified path resolution
-            guard let oldNode = try await self.resolve(transaction: transaction, path: oldPath) else {
-                throw DirectoryError.directoryNotFound(path: oldPath)
-            }
+        // Create parent path if necessary
+        if newPath.count > 1 {
+            let parentPath = Array(newPath.dropLast())
+            _ = try await self.createOrOpenInternal(
+                transaction: transaction,
+                path: parentPath,
+                type: nil,
+                prefix: nil,
+                allowCreate: true,
+                allowOpen: true
+            )
+        }
 
-            // Check destination doesn't exist
-            if let _ = try await self.resolve(transaction: transaction, path: newPath) {
-                throw DirectoryError.directoryAlreadyExists(path: newPath)
-            }
+        // Remove old parent's reference
+        if !oldPath.isEmpty {
+            let oldParentPath = Array(oldPath.dropLast())
+            let oldDirectoryName = oldPath.last!
 
-            // Create parent path if necessary
-            if newPath.count > 1 {
-                let parentPath = Array(newPath.dropLast())
-                _ = try await self.createOrOpenInternal(
-                    transaction: transaction,
-                    path: parentPath,
-                    type: nil,
-                    prefix: nil,
-                    allowCreate: true,
-                    allowOpen: true
-                )
-            }
-
-            // Remove old parent's reference
-            if !oldPath.isEmpty {
-                let oldParentPath = Array(oldPath.dropLast())
-                let oldDirectoryName = oldPath.last!
-
-                guard let oldParentDirectory = try await self.resolve(transaction: transaction, path: oldParentPath) else {
-                    // Parent doesn't exist - this shouldn't happen
-                    throw DirectoryError.directoryNotFound(path: oldParentPath)
-                }
-
-                // Use unified helper to get metadata
-                let oldParentMetadata = try await getMetadata(transaction: transaction, for: oldParentDirectory)
-                let oldSubdirectoryKey = oldParentMetadata
-                    .subspace(Self.subdirs)
-                    .pack(Tuple(oldDirectoryName))
-                transaction.clear(key: Array(oldSubdirectoryKey))
-            }
-
-            // Add new parent's reference
-            let newParentPath = Array(newPath.dropLast())
-            let newDirectoryName = newPath.last!
-
-            guard let newParentDirectory = try await self.resolve(transaction: transaction, path: newParentPath) else {
-                // Parent doesn't exist - this shouldn't happen after creation above
-                throw DirectoryError.directoryNotFound(path: newParentPath)
+            guard let oldParentDirectory = try await self.resolve(transaction: transaction, path: oldParentPath) else {
+                // Parent doesn't exist - this shouldn't happen
+                throw DirectoryError.directoryNotFound(path: oldParentPath)
             }
 
             // Use unified helper to get metadata
-            let newParentMetadata = try await getMetadata(transaction: transaction, for: newParentDirectory)
-            let newSubdirectoryKey = newParentMetadata
+            let oldParentMetadata = try await getMetadata(transaction: transaction, for: oldParentDirectory)
+            let oldSubdirectoryKey =
+                oldParentMetadata
                 .subspace(Self.subdirs)
-                .pack(Tuple(newDirectoryName))
-
-            // Convert absolute prefix to relative before storing in metadata.
-            // resolve() returns absolute prefix, but metadata stores relative prefix.
-            let relativePrefix: FDB.Bytes
-            if !contentSubspace.prefix.isEmpty && oldNode.prefix.starts(with: contentSubspace.prefix) {
-                relativePrefix = Array(oldNode.prefix.dropFirst(contentSubspace.prefix.count))
-            } else {
-                relativePrefix = oldNode.prefix
-            }
-
-            transaction.setValue(
-                Array(relativePrefix),
-                for: Array(newSubdirectoryKey)
-            )
-
-            // Return DirectorySubspace with new path
-            return DirectorySubspace(
-                subspace: Subspace(prefix: Array(oldNode.prefix)),
-                path: newPath,  // Use original requested newPath
-                type: oldNode.type
-            )
+                .pack(Tuple(oldDirectoryName))
+            try transaction.clear(key: Array(oldSubdirectoryKey))
         }
+
+        // Add new parent's reference
+        let newParentPath = Array(newPath.dropLast())
+        let newDirectoryName = newPath.last!
+
+        guard let newParentDirectory = try await self.resolve(transaction: transaction, path: newParentPath) else {
+            // Parent doesn't exist - this shouldn't happen after creation above
+            throw DirectoryError.directoryNotFound(path: newParentPath)
+        }
+
+        // Use unified helper to get metadata
+        let newParentMetadata = try await getMetadata(transaction: transaction, for: newParentDirectory)
+        let newSubdirectoryKey =
+            newParentMetadata
+            .subspace(Self.subdirs)
+            .pack(Tuple(newDirectoryName))
+
+        // Convert absolute prefix to relative before storing in metadata.
+        // resolve() returns absolute prefix, but metadata stores relative prefix.
+        let relativePrefix: FDB.Bytes
+        if !contentSubspace.prefix.isEmpty && oldNode.prefix.starts(with: contentSubspace.prefix) {
+            relativePrefix = Array(oldNode.prefix.dropFirst(contentSubspace.prefix.count))
+        } else {
+            relativePrefix = oldNode.prefix
+        }
+
+        try transaction.setValue(
+            Array(relativePrefix),
+            for: Array(newSubdirectoryKey)
+        )
+
+        // Return DirectorySubspace with new path
+        return DirectorySubspace(
+            subspace: Subspace(prefix: Array(oldNode.prefix)),
+            path: newPath,  // Use original requested newPath
+            type: oldNode.type
+        )
     }
 
     /// Move a directory from one location to another (convenience overload).
@@ -431,6 +486,19 @@ public final class DirectoryLayer: Sendable {
         try await move(oldPath: oldPath, newPath: newPath)
     }
 
+    /// Move a directory in a caller-owned transaction.
+    public func move(
+        from oldPath: [String],
+        to newPath: [String],
+        transaction: any TransactionProtocol
+    ) async throws -> DirectorySubspace {
+        try await move(
+            oldPath: oldPath,
+            newPath: newPath,
+            transaction: transaction
+        )
+    }
+
     /// Remove a directory and all its contents
     ///
     /// - Parameter path: Directory path to remove
@@ -438,11 +506,18 @@ public final class DirectoryLayer: Sendable {
     public func remove(
         path: [String]
     ) async throws {
-        try validatePath(path)
-
         try await database.withTransaction { transaction in
-            try await self.removeInternal(transaction: transaction, path: path)
+            try await self.remove(path: path, transaction: transaction)
         }
+    }
+
+    /// Remove a directory and its contents in a caller-owned transaction.
+    public func remove(
+        path: [String],
+        transaction: any TransactionProtocol
+    ) async throws {
+        try validateNonRootPath(path)
+        try await removeInternal(transaction: transaction, path: path)
     }
 
     /// Internal remove implementation with transaction parameter
@@ -480,7 +555,7 @@ public final class DirectoryLayer: Sendable {
                 let subdirectoryKey = parentMetadata
                     .subspace(Self.subdirs)
                     .pack(Tuple(directoryName))
-                transaction.clear(key: Array(subdirectoryKey))
+                try transaction.clear(key: Array(subdirectoryKey))
             }
 
             return
@@ -509,7 +584,7 @@ public final class DirectoryLayer: Sendable {
             let subdirectoryKey = parentMetadata
                 .subspace(Self.subdirs)
                 .pack(Tuple(directoryName))
-            transaction.clear(key: Array(subdirectoryKey))
+            try transaction.clear(key: Array(subdirectoryKey))
         }
     }
 
@@ -520,12 +595,18 @@ public final class DirectoryLayer: Sendable {
     public func exists(
         path: [String]
     ) async throws -> Bool {
-        try validatePath(path)
-
         return try await database.withTransaction { transaction in
-            let node = try await self.resolve(transaction: transaction, path: path)
-            return node != nil
+            try await self.exists(path: path, transaction: transaction)
         }
+    }
+
+    /// Check directory existence in a caller-owned transaction.
+    public func exists(
+        path: [String],
+        transaction: any TransactionProtocol
+    ) async throws -> Bool {
+        try validatePathComponents(path)
+        return try await resolve(transaction: transaction, path: path) != nil
     }
 
     /// List subdirectories of a directory
@@ -537,28 +618,40 @@ public final class DirectoryLayer: Sendable {
         path: [String]
     ) async throws -> [String] {
         return try await database.withTransaction { transaction in
-            // Check if path is inside a partition - if so, delegate to partition layer
-            if let (partitionPath, partitionDirectory) = try await findPartitionAncestor(
-                transaction: transaction,
-                path: path
-            ) {
-                // Path is inside a partition - delegate to partition layer
-                let pathInPartition = Array(path.dropFirst(partitionPath.count))
-                let partitionLayer = try createPartitionLayer(prefix: partitionDirectory.prefix)
-                return try await partitionLayer.list(path: pathInPartition)
-            }
+            try await self.list(path: path, transaction: transaction)
+        }
+    }
 
-            // Normal path - use resolve() for unified path resolution
-            guard let directory = try await self.resolve(transaction: transaction, path: path) else {
-                throw DirectoryError.directoryNotFound(path: path)
-            }
-
-            // Use unified helper that works for both partition and normal directories
-            return try await self.listChildren(
-                transaction: transaction,
-                directory: directory
+    /// List subdirectories in a caller-owned transaction.
+    public func list(
+        path: [String],
+        transaction: any TransactionProtocol
+    ) async throws -> [String] {
+        try validatePathComponents(path)
+        // Check if path is inside a partition - if so, delegate to partition layer
+        if let (partitionPath, partitionDirectory) = try await findPartitionAncestor(
+            transaction: transaction,
+            path: path
+        ) {
+            // Path is inside a partition - delegate to partition layer
+            let pathInPartition = Array(path.dropFirst(partitionPath.count))
+            let partitionLayer = try createPartitionLayer(prefix: partitionDirectory.prefix)
+            return try await partitionLayer.list(
+                path: pathInPartition,
+                transaction: transaction
             )
         }
+
+        // Normal path - use resolve() for unified path resolution
+        guard let directory = try await self.resolve(transaction: transaction, path: path) else {
+            throw DirectoryError.directoryNotFound(path: path)
+        }
+
+        // Use unified helper that works for both partition and normal directories
+        return try await self.listChildren(
+            transaction: transaction,
+            directory: directory
+        )
     }
 
     // MARK: - Internal Operations
@@ -698,13 +791,13 @@ public final class DirectoryLayer: Sendable {
         let subdirKey = parentMetadata
             .subspace(Self.subdirs)
             .pack(Tuple(dirName))
-        transaction.setValue(Array(relativePrefix), for: Array(subdirKey))
+        try transaction.setValue(Array(relativePrefix), for: Array(subdirKey))
 
         // Store layer metadata using relative prefix
         if let layerType = type {
             let prefixSubspace = Subspace(prefix: self.nodeSubspace.prefix + relativePrefix)
             let layerKey = prefixSubspace.pack(Tuple(Self.layerKey))
-            transaction.setValue(layerType.rawValue, for: Array(layerKey))
+            try transaction.setValue(layerType.rawValue, for: Array(layerKey))
         }
 
         // Create and return DirectorySubspace
@@ -821,34 +914,6 @@ public final class DirectoryLayer: Sendable {
         )
     }
 
-    /// Legacy find method (calls resolve and converts to Node)
-    private func find(
-        transaction: any TransactionProtocol,
-        path: [String]
-    ) async throws -> Node {
-        let dir = try await resolve(transaction: transaction, path: path)
-        if let dir = dir {
-            // Directory exists
-            let metadata = Subspace(prefix: nodeSubspace.prefix + dir.prefix)
-            return Node(
-                subspace: metadata,
-                path: dir.path,
-                prefix: dir.prefix,
-                exists: true,
-                type: dir.type
-            )
-        } else {
-            // Directory doesn't exist
-            return Node(
-                subspace: nodeSubspace,
-                path: path,
-                prefix: [],
-                exists: false,
-                type: nil
-            )
-        }
-    }
-
     /// Load layer metadata for a node
     private func loadLayer(
         transaction: any TransactionProtocol,
@@ -858,7 +923,7 @@ public final class DirectoryLayer: Sendable {
         guard let layerData = try await transaction.getValue(for: Array(layerKey), snapshot: false) else {
             return nil
         }
-        return DirectoryType(rawValue: layerData)
+        return DirectoryType(rawValue: layerData.copyBytes())
     }
 
     /// List subdirectories of a node
@@ -872,8 +937,8 @@ public final class DirectoryLayer: Sendable {
         var children: Set<String> = []
 
         let sequence = transaction.getRange(
-            beginSelector: .firstGreaterOrEqual(begin),
-            endSelector: .firstGreaterOrEqual(end),
+            from: .firstGreaterOrEqual(begin),
+            to: .firstGreaterOrEqual(end),
             snapshot: true
         )
 
@@ -1025,7 +1090,7 @@ public final class DirectoryLayer: Sendable {
         // Remove directory metadata using unified helper
         let directoryMetadata = try await getMetadata(transaction: transaction, for: directory)
         let metadataRange = directoryMetadata.range()
-        transaction.clearRange(
+        try transaction.clearRange(
             beginKey: Array(metadataRange.begin),
             endKey: Array(metadataRange.end)
         )
@@ -1033,7 +1098,7 @@ public final class DirectoryLayer: Sendable {
         // Remove directory content
         let contentSubspace = Subspace(prefix: directory.prefix)
         let contentRange = contentSubspace.range()
-        transaction.clearRange(
+        try transaction.clearRange(
             beginKey: Array(contentRange.begin),
             endKey: Array(contentRange.end)
         )
@@ -1068,7 +1133,7 @@ public final class DirectoryLayer: Sendable {
 
         if let versionData = try await transaction.getValue(for: Array(versionKey), snapshot: false) {
             // Parse stored version
-            let tuple = try Tuple.unpack(from: versionData)
+            let tuple = try Tuple.unpack(from: versionData.copyBytes())
             guard tuple.count == 3 else {
                 throw DirectoryError.invalidVersion(data: Data(versionData))
             }
@@ -1108,7 +1173,7 @@ public final class DirectoryLayer: Sendable {
             // First time - write version
             let version = DirectoryVersion.current
             let versionTuple = Tuple(version.major, version.minor, version.patch)
-            transaction.setValue(
+            try transaction.setValue(
                 versionTuple.pack(),
                 for: Array(versionKey)
             )
@@ -1116,11 +1181,17 @@ public final class DirectoryLayer: Sendable {
     }
 
     /// Validate path
-    private func validatePath(_ path: [String]) throws {
+    private func validateNonRootPath(_ path: [String]) throws {
         guard !path.isEmpty else {
             throw DirectoryError.invalidPath(path: path, reason: "Path cannot be empty")
         }
 
+        try validatePathComponents(path)
+    }
+
+    /// Validate every supplied path component. An empty path denotes this
+    /// layer's root and is valid for operations such as `list`.
+    private func validatePathComponents(_ path: [String]) throws {
         for component in path {
             guard !component.isEmpty else {
                 throw DirectoryError.invalidPath(path: path, reason: "Path component cannot be empty")
@@ -1167,7 +1238,7 @@ public final class DirectoryLayer: Sendable {
                     throw DirectoryError.prefixInUse(prefix: prefix)
                 }
             }
-        } catch {
+        } catch is TupleError {
             // Prefix is not tuple-encoded (manual prefix), skip HCA check
             // Manual prefixes won't be in HCA recent allocations anyway
         }
@@ -1201,9 +1272,9 @@ public final class DirectoryLayer: Sendable {
         let (begin, end) = subdirsSubspace.range()
 
         for try await (key, value) in transaction.getRange(
-            beginKey: begin,
-            endKey: end,
-            snapshot: true  // Use snapshot for read-only validation
+            from: begin,
+            to: end,
+            snapshot: false
         ) {
             // value is the RELATIVE prefix of a subdirectory
             let relativePrefix = value
@@ -1224,44 +1295,41 @@ public final class DirectoryLayer: Sendable {
             // IMPORTANT: Recursively check this subdirectory's children
             // We must check ALL levels, not just direct subdirs
             // Extract child name from key: node[SUBDIRS][childName]
-            do {
-                let keyTuple = try subdirsSubspace.unpack(key)
-                if keyTuple.count > 0, let childName = keyTuple[0] as? String {
-                    // Create child node subspace - relativePrefix is raw bytes
-                    let childNode = Subspace(prefix: nodeSubspace.prefix + relativePrefix)
-                    let childPath = path + [childName]
+            let keyTuple = try subdirsSubspace.unpack(key.copyBytes())
+            guard keyTuple.count > 0, let childName = keyTuple[0] as? String else {
+                throw TupleError.invalidDecoding("Directory metadata contains an invalid child key")
+            }
 
-                    // Check if this child is a partition
-                    let layer = try await loadLayer(transaction: transaction, subspace: childNode)
+            // Create child node subspace - relativePrefix is raw bytes
+            let childNode = Subspace(prefix: nodeSubspace.prefix + relativePrefix)
+            let childPath = path + [childName]
 
-                    if layer == .partition {
-                        // Delegate validation to the partition's internal DirectoryLayer
-                        // Only validate if the candidate prefix is inside the partition
-                        if prefix.starts(with: existingAbsolutePrefix) {
-                            // Convert absolute prefix to partition's coordinate system
-                            let partitionRelativePrefix = Array(prefix.dropFirst(existingAbsolutePrefix.count))
-                            let partitionLayer = try createPartitionLayer(prefix: existingAbsolutePrefix)
-                            try await partitionLayer.validatePrefixRecursive(
-                                transaction: transaction,
-                                prefix: partitionLayer.contentSubspace.prefix + partitionRelativePrefix,
-                                node: partitionLayer.rootNode,
-                                path: childPath
-                            )
-                        }
-                        // If prefix doesn't start with partition prefix, it won't conflict with partition contents
-                    } else {
-                        // Recurse into child directory normally
-                        try await validatePrefixRecursive(
-                            transaction: transaction,
-                            prefix: prefix,
-                            node: childNode,
-                            path: childPath
-                        )
-                    }
+            // Check if this child is a partition
+            let layer = try await loadLayer(transaction: transaction, subspace: childNode)
+
+            if layer == .partition {
+                // Delegate validation to the partition's internal DirectoryLayer
+                // Only validate if the candidate prefix is inside the partition
+                if prefix.starts(with: existingAbsolutePrefix) {
+                    // Convert absolute prefix to partition's coordinate system
+                    let partitionRelativePrefix = Array(prefix.dropFirst(existingAbsolutePrefix.count))
+                    let partitionLayer = try createPartitionLayer(prefix: existingAbsolutePrefix)
+                    try await partitionLayer.validatePrefixRecursive(
+                        transaction: transaction,
+                        prefix: partitionLayer.contentSubspace.prefix + partitionRelativePrefix,
+                        node: partitionLayer.rootNode,
+                        path: childPath
+                    )
                 }
-            } catch {
-                // Skip keys that can't be unpacked (might be from different subspace)
-                continue
+                // If prefix doesn't start with partition prefix, it won't conflict with partition contents
+            } else {
+                // Recurse into child directory normally
+                try await validatePrefixRecursive(
+                    transaction: transaction,
+                    prefix: prefix,
+                    node: childNode,
+                    path: childPath
+                )
             }
         }
     }

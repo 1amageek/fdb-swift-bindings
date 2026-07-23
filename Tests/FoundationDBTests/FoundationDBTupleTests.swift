@@ -111,6 +111,47 @@ func tupleDouble() throws {
     #expect(offset == encoded.count, "Offset should advance to end of encoded data")
 }
 
+@Test("Tuple scalar decoding rejects invalid offsets without trapping")
+func tupleScalarInvalidOffsets() {
+    let floatBytes = Float(1).encodeTuple()
+    var negativeFloatOffset = -1
+    #expect(throws: TupleError.self) {
+        _ = try Float.decodeTuple(
+            from: floatBytes,
+            at: &negativeFloatOffset
+        )
+    }
+    #expect(negativeFloatOffset == -1)
+
+    let doubleBytes = Double(1).encodeTuple()
+    var overflowingDoubleOffset = Int.max
+    #expect(throws: TupleError.self) {
+        _ = try Double.decodeTuple(
+            from: doubleBytes,
+            at: &overflowingDoubleOffset
+        )
+    }
+    #expect(overflowingDoubleOffset == Int.max)
+
+    var shortIntegerOffset = 1
+    #expect(throws: TupleError.self) {
+        _ = try Int64.decodeTuple(
+            from: [TupleTypeCode.intZero.rawValue + 1],
+            at: &shortIntegerOffset
+        )
+    }
+    #expect(shortIntegerOffset == 1)
+
+    var oversizedIntegerOffset = 1
+    #expect(throws: TupleError.self) {
+        _ = try Int64.decodeTuple(
+            from: [TupleTypeCode.positiveIntEnd.rawValue],
+            at: &oversizedIntegerOffset
+        )
+    }
+    #expect(oversizedIntegerOffset == 1)
+}
+
 @Test("TupleUUID encoding and decoding")
 func tupleUUID() throws {
     let testUUID = UUID()

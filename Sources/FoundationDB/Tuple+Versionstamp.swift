@@ -36,10 +36,8 @@ extension Tuple {
     ///
     /// - Parameter prefix: Optional prefix bytes to prepend (default: empty)
     /// - Returns: Packed bytes with offset appended
-    /// - Throws: `TupleError.invalidEncoding` if:
-    ///   - No incomplete versionstamp found
-    ///   - Multiple incomplete versionstamps found
-    ///   - Offset exceeds maximum value (65535 for API < 520, 4294967295 for API >= 520)
+    /// - Throws: A typed `TupleError` when the tuple does not contain exactly
+    ///   one incomplete versionstamp or its offset cannot be represented.
     ///
     /// Example usage:
     /// ```swift
@@ -74,9 +72,11 @@ extension Tuple {
             packed.append(contentsOf: element.encodeTuple())
         }
 
-        // Validate exactly one incomplete versionstamp
-        guard incompleteCount == 1, let position = versionstampPosition else {
-            throw TupleError.invalidEncoding
+        guard incompleteCount > 0, let position = versionstampPosition else {
+            throw TupleError.missingIncompleteVersionstamp
+        }
+        guard incompleteCount == 1 else {
+            throw TupleError.multipleIncompleteVersionstamps
         }
 
         // Append offset based on API version
@@ -84,20 +84,18 @@ extension Tuple {
         // API < 520 used 2-byte offset, but is no longer supported
 
         // API >= 520: Use 4-byte offset (uint32, little-endian)
-        guard position <= UInt32.max else {
-            throw TupleError.invalidEncoding
+        guard let offset = UInt32(exactly: position) else {
+            throw TupleError.versionstampOffsetOverflow(position)
         }
 
-        let offset = UInt32(position)
         withUnsafeBytes(of: offset.littleEndian) { packed.append(contentsOf: $0) }
 
         return packed
     }
 
-    /// Check if tuple contains an incomplete versionstamp
-    /// - Returns: true if any element is an incomplete versionstamp
-    public func hasIncompleteVersionstamp() -> Bool {
-        return elements.contains { element in
+    /// Whether the tuple contains an incomplete versionstamp.
+    public var containsIncompleteVersionstamp: Bool {
+        elements.contains { element in
             if let vs = element as? Versionstamp {
                 return !vs.isComplete
             }
@@ -105,10 +103,9 @@ extension Tuple {
         }
     }
 
-    /// Count incomplete versionstamps in tuple
-    /// - Returns: Number of incomplete versionstamps
-    public func countIncompleteVersionstamps() -> Int {
-        return elements.count { element in
+    /// Number of incomplete versionstamps in the tuple.
+    public var incompleteVersionstampCount: Int {
+        elements.count { element in
             if let vs = element as? Versionstamp {
                 return !vs.isComplete
             }
@@ -117,89 +114,15 @@ extension Tuple {
     }
 
     /// Validate tuple for use with packWithVersionstamp()
-    /// - Throws: `TupleError.invalidEncoding` if validation fails
+    /// - Throws: A typed `TupleError` unless exactly one versionstamp is incomplete.
     public func validateForVersionstamp() throws {
-        let incompleteCount = countIncompleteVersionstamps()
+        let incompleteCount = incompleteVersionstampCount
 
-        if incompleteCount != 1 {
-            throw TupleError.invalidEncoding
+        guard incompleteCount > 0 else {
+            throw TupleError.missingIncompleteVersionstamp
         }
-    }
-}
-
-// MARK: - Tuple Decoding Support
-
-extension Tuple {
-
-    /// Decode tuple that may contain versionstamps
-    ///
-    /// This is an enhanced version of decode() that supports TupleTypeCode.versionstamp (0x33).
-    /// It maintains backward compatibility with existing decode() implementation.
-    ///
-    /// - Parameter bytes: Encoded tuple bytes
-    /// - Returns: Array of decoded tuple elements
-    /// - Throws: `TupleError.invalidEncoding` if decoding fails
-    public static func decodeWithVersionstamp(from bytes: FDB.Bytes) throws -> [any TupleElement] {
-        var elements: [any TupleElement] = []
-        var offset = 0
-
-        while offset < bytes.count {
-            guard offset < bytes.count else { break }
-
-            let typeCode = bytes[offset]
-            offset += 1
-
-            switch typeCode {
-            case TupleTypeCode.versionstamp.rawValue:
-                let element = try Versionstamp.decodeTuple(from: bytes, at: &offset)
-                elements.append(element)
-
-            // For other type codes, delegate to existing decode logic
-            // This requires refactoring Tuple.decode() to be reusable
-            // For now, we handle the most common cases:
-
-            case TupleTypeCode.bytes.rawValue:
-                var value: [UInt8] = []
-                while offset < bytes.count && bytes[offset] != 0x00 {
-                    if bytes[offset] == 0xFF {
-                        offset += 1
-                        if offset < bytes.count && bytes[offset] == 0xFF {
-                            value.append(0x00)
-                            offset += 1
-                        }
-                    } else {
-                        value.append(bytes[offset])
-                        offset += 1
-                    }
-                }
-                offset += 1  // Skip terminating 0x00
-                elements.append(value as FDB.Bytes)
-
-            case TupleTypeCode.string.rawValue:
-                var value: [UInt8] = []
-                while offset < bytes.count && bytes[offset] != 0x00 {
-                    if bytes[offset] == 0xFF {
-                        offset += 1
-                        if offset < bytes.count && bytes[offset] == 0xFF {
-                            value.append(0x00)
-                            offset += 1
-                        }
-                    } else {
-                        value.append(bytes[offset])
-                        offset += 1
-                    }
-                }
-                offset += 1  // Skip terminating 0x00
-                let string = String(decoding: value, as: UTF8.self)
-                elements.append(string)
-
-            default:
-                // For other types, fall back to standard decode
-                // This is a simplified version; full implementation should reuse Tuple.decode()
-                throw TupleError.invalidEncoding
-            }
+        guard incompleteCount == 1 else {
+            throw TupleError.multipleIncompleteVersionstamps
         }
-
-        return elements
     }
 }

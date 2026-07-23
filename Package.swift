@@ -44,7 +44,7 @@ let package = Package(
         ),
         .testTarget(
             name: "FoundationDBTests",
-            dependencies: ["FoundationDB"],
+            dependencies: ["FoundationDB", "CFoundationDB"],
             linkerSettings: [
                 .unsafeFlags(["-L/usr/local/lib"]),
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "/usr/local/lib"])

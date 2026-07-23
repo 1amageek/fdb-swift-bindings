@@ -37,7 +37,7 @@ public enum DirectoryError: Error, Sendable {
     /// - Parameter path: The path where a directory already exists
     case directoryAlreadyExists(path: [String])
 
-    /// Invalid path (empty or contains empty components)
+    /// Invalid path for the requested operation or a path containing empty components
     ///
     /// Thrown when a path is malformed or contains invalid components.
     /// - Parameters:

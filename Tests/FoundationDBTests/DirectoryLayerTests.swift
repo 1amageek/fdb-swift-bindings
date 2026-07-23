@@ -25,11 +25,15 @@ import Testing
 struct DirectoryLayerTests {
     let database: any DatabaseProtocol
 
+    private enum TransactionRollbackProbe: Error {
+        case rollback
+    }
+
     init() async throws {
         // Initialize FDB network if needed
         try await FDBClient.maybeInitialize()
 
-        self.database = try FDBClient.openDatabase()
+        self.database = try FDBClient.openTestDatabase()
 
         // Clean up ALL test data ONLY in the test subspace
         // IMPORTANT: Never clear the entire keyspace [0x00, 0xFF]
@@ -39,7 +43,7 @@ struct DirectoryLayerTests {
         // Clear the entire test subspace before running any tests
         let (begin, end) = testSubspace.range()
         try await database.withTransaction { transaction in
-            transaction.clearRange(
+            try transaction.clearRange(
                 beginKey: begin,
                 endKey: end
             )
@@ -54,6 +58,13 @@ struct DirectoryLayerTests {
             nodeSubspace: testSubspace.subspace(0xFE),  // Test metadata
             contentSubspace: testSubspace                // Test data
         )
+    }
+
+    private func directoryLayerContentMarker(name: String) -> FDB.Bytes {
+        let testSubspace = Subspace(
+            prefix: Tuple("directory-layer-tests").pack()
+        ).subspace(name)
+        return testSubspace.pack(Tuple("transaction-marker"))
     }
 
     // MARK: - Basic Operations
@@ -71,6 +82,174 @@ struct DirectoryLayerTests {
         let reopened = try await directoryLayer.open(path: ["test"])
         #expect(reopened.prefix == dir.prefix)
         #expect(reopened.path == ["test"])
+    }
+
+    @Test("Caller-owned transaction exposes staged directory operations")
+    func callerOwnedTransactionVisibility() async throws {
+        let directoryLayer = makeDirectoryLayer(
+            name: "callerOwnedTransactionVisibility"
+        )
+
+        try await database.withTransaction { transaction in
+            let created = try await directoryLayer.createOrOpen(
+                path: ["parent", "child"],
+                transaction: transaction
+            )
+            #expect(
+                try await directoryLayer.exists(
+                    path: ["parent", "child"],
+                    transaction: transaction
+                )
+            )
+            let opened = try await directoryLayer.open(
+                path: ["parent", "child"],
+                transaction: transaction
+            )
+            #expect(opened.prefix == created.prefix)
+            #expect(
+                try await directoryLayer.list(
+                    path: ["parent"],
+                    transaction: transaction
+                ) == ["child"]
+            )
+        }
+
+        #expect(
+            try await directoryLayer.exists(path: ["parent", "child"])
+        )
+    }
+
+    @Test("Root queries support caller-owned transactions")
+    func rootQueriesSupportCallerOwnedTransactions() async throws {
+        let directoryLayer = makeDirectoryLayer(
+            name: "rootQueriesSupportCallerOwnedTransactions"
+        )
+
+        #expect(try await directoryLayer.exists(path: []))
+
+        try await database.withTransaction { transaction in
+            #expect(
+                try await directoryLayer.exists(
+                    path: [],
+                    transaction: transaction
+                )
+            )
+            #expect(
+                try await directoryLayer.list(
+                    path: [],
+                    transaction: transaction
+                ).isEmpty
+            )
+
+            _ = try await directoryLayer.createOrOpen(
+                path: ["child"],
+                transaction: transaction
+            )
+            #expect(
+                try await directoryLayer.list(
+                    path: [],
+                    transaction: transaction
+                ) == ["child"]
+            )
+        }
+    }
+
+    @Test("Partition root listing uses the caller-owned transaction")
+    func partitionRootListingUsesCallerOwnedTransaction() async throws {
+        let directoryLayer = makeDirectoryLayer(
+            name: "partitionRootListingUsesCallerOwnedTransaction"
+        )
+
+        try await database.withTransaction { transaction in
+            _ = try await directoryLayer.createOrOpen(
+                path: ["tenant"],
+                type: .partition,
+                transaction: transaction
+            )
+            _ = try await directoryLayer.createOrOpen(
+                path: ["tenant", "events"],
+                transaction: transaction
+            )
+
+            #expect(
+                try await directoryLayer.list(
+                    path: ["tenant"],
+                    transaction: transaction
+                ) == ["events"]
+            )
+        }
+    }
+
+    @Test("Concrete directory operations reject the root path")
+    func concreteOperationsRejectRootPath() async {
+        let directoryLayer = makeDirectoryLayer(
+            name: "concreteOperationsRejectRootPath"
+        )
+
+        await #expect(throws: DirectoryError.self) {
+            _ = try await directoryLayer.createOrOpen(path: [])
+        }
+        await #expect(throws: DirectoryError.self) {
+            _ = try await directoryLayer.create(path: [])
+        }
+        await #expect(throws: DirectoryError.self) {
+            _ = try await directoryLayer.open(path: [])
+        }
+        await #expect(throws: DirectoryError.self) {
+            try await directoryLayer.remove(path: [])
+        }
+        await #expect(throws: DirectoryError.self) {
+            _ = try await directoryLayer.move(
+                oldPath: [],
+                newPath: ["destination"]
+            )
+        }
+    }
+
+    @Test("All directory queries reject empty path components")
+    func directoryQueriesRejectEmptyComponents() async {
+        let directoryLayer = makeDirectoryLayer(
+            name: "directoryQueriesRejectEmptyComponents"
+        )
+
+        await #expect(throws: DirectoryError.self) {
+            _ = try await directoryLayer.exists(path: [""])
+        }
+        await #expect(throws: DirectoryError.self) {
+            _ = try await directoryLayer.list(path: [""])
+        }
+    }
+
+    @Test("Caller-owned transaction rolls directory metadata back atomically")
+    func callerOwnedTransactionRollback() async throws {
+        let directoryLayer = makeDirectoryLayer(
+            name: "callerOwnedTransactionRollback"
+        )
+        let marker = directoryLayerContentMarker(
+            name: "callerOwnedTransactionRollback"
+        )
+
+        do {
+            try await database.withTransaction { transaction in
+                _ = try await directoryLayer.createOrOpen(
+                    path: ["rolled-back"],
+                    transaction: transaction
+                )
+                try transaction.setValue([0x01], for: marker)
+                throw TransactionRollbackProbe.rollback
+            }
+            Issue.record("Expected caller-owned transaction rollback")
+        } catch TransactionRollbackProbe.rollback {
+        }
+
+        let directoryExists = try await directoryLayer.exists(
+            path: ["rolled-back"]
+        )
+        #expect(!directoryExists)
+        let markerValue = try await database.withTransaction { transaction in
+            try await transaction.getValue(for: marker, snapshot: true)
+        }
+        #expect(markerValue == nil)
     }
 
     @Test("Create already existing directory throws error")
@@ -341,8 +520,8 @@ struct DirectoryLayerTests {
             let key1 = dir1.pack(Tuple("user:123"))
             let key2 = dir2.pack(Tuple("user:123"))
 
-            transaction.setValue([0x01], for: Array(key1))
-            transaction.setValue([0x02], for: Array(key2))
+            try transaction.setValue([0x01], for: Array(key1))
+            try transaction.setValue([0x02], for: Array(key2))
         }
 
         // Read back and verify isolation
@@ -353,8 +532,8 @@ struct DirectoryLayerTests {
             let value1 = try await transaction.getValue(for: Array(key1), snapshot: false)
             let value2 = try await transaction.getValue(for: Array(key2), snapshot: false)
 
-            #expect(value1 == [0x01] as FDB.Bytes)
-            #expect(value2 == [0x02] as FDB.Bytes)
+            #expect(value1?.copyBytes() == [0x01] as FDB.Bytes)
+            #expect(value2?.copyBytes() == [0x02] as FDB.Bytes)
         }
     }
 
@@ -550,7 +729,10 @@ struct DirectoryLayerTests {
         try await database.withTransaction { transaction in
             // Write some data using root directory
             let dataKey = rootDirectory.pack(Tuple("test-data"))
-            transaction.setValue([0x01, 0x02, 0x03], for: Array(dataKey))
+            try transaction.setValue(
+                [0x01, 0x02, 0x03],
+                for: Array(dataKey)
+            )
         }
 
         // Create a subdirectory after writing to root
@@ -671,7 +853,7 @@ struct DirectoryLayerTests {
         // Write some data
         try await database.withTransaction { transaction in
             let key = original.subspace.pack(Tuple("test"))
-            transaction.setValue([0x42], for: Array(key))
+            try transaction.setValue([0x42], for: Array(key))
         }
 
         // Move the directory

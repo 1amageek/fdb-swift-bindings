@@ -127,7 +127,7 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
         let userVersionBytes = bytes.suffix(userVersionSize)
 
         let userVersion = userVersionBytes.withUnsafeBytes {
-            $0.load(as: UInt16.self).bigEndian
+            $0.loadUnaligned(as: UInt16.self).bigEndian
         }
 
         // Check if transaction version is incomplete (all 0xFF)
@@ -175,7 +175,9 @@ extension Versionstamp: TupleElement {
     }
 
     public static func decodeTuple(from bytes: FDB.Bytes, at offset: inout Int) throws -> Versionstamp {
-        guard offset + Versionstamp.totalSize <= bytes.count else {
+        guard offset >= 0,
+              offset <= bytes.count,
+              bytes.count - offset >= Versionstamp.totalSize else {
             throw TupleError.invalidEncoding
         }
 

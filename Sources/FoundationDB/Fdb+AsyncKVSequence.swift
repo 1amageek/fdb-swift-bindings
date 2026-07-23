@@ -18,17 +18,19 @@
  * limitations under the License.
  */
 
+import Synchronization
+
 /// Provides async sequence support for iterating over FoundationDB key-value ranges.
 ///
 /// This file implements efficient streaming iteration over large result sets from FoundationDB
-/// using Swift's AsyncSequence protocol with optimized background pre-fetching.
+/// using Swift's AsyncSequence protocol with demand-driven page reads.
 
 extension FDB {
     /// An asynchronous sequence that efficiently streams key-value pairs from FoundationDB.
     ///
-    /// `AsyncKVSequence` provides a Swift-native way to iterate over large result sets from
+    /// `AsyncKVSequence` provides an asynchronous way to iterate over large result sets from
     /// FoundationDB range queries without loading all data into memory at once. It implements
-    /// background pre-fetching to minimize network latency and maximize throughput.
+    /// demand-driven reads so database I/O cannot outlive a returned element.
     ///
     /// ## Usage
     ///
@@ -55,19 +57,19 @@ extension FDB {
     /// ## Performance Characteristics
     ///
     /// - **Streaming**: Results are processed as they arrive, not buffered entirely in memory
-    /// - **Background Pre-fetching**: Next batch is fetched concurrently while processing current batch
+    /// - **Deterministic lifecycle**: No next-page I/O runs while the caller owns an element
     /// - **Configurable Streaming Mode**: Use `.wantAll` for bulk reads, `.iterator` for balanced reads
     /// - **Snapshot Consistency**: Supports both snapshot and non-snapshot reads
     ///
     /// ## Implementation Notes
     ///
     /// The sequence uses an optimized async iterator that:
-    /// 1. Starts pre-fetching the next batch immediately upon initialization
-    /// 2. Continues pre-fetching in background while serving current batch items
-    /// 3. Only blocks when transitioning between batches if pre-fetch isn't complete
+    /// 1. Fetches a page only when `next()` needs one
+    /// 2. Completes database I/O before returning an element
+    /// 3. Leaves no in-flight read after `next()` returns
     /// 4. Tracks iteration count internally for ITERATOR streaming mode optimization
     public struct AsyncKVSequence: AsyncSequence, Sendable {
-        public typealias Element = (Bytes, Bytes)
+        public typealias Element = (ByteString, ByteString)
 
         /// The transaction used for range queries
         let transaction: TransactionProtocol
@@ -114,9 +116,6 @@ extension FDB {
 
         /// Creates a new async iterator for this sequence.
         ///
-        /// The iterator begins background pre-fetching immediately upon creation to minimize
-        /// latency for the first `next()` call.
-        ///
         /// - Returns: A new `AsyncIterator` configured for this sequence
         public func makeAsyncIterator() -> AsyncIterator {
             AsyncIterator(
@@ -130,90 +129,22 @@ extension FDB {
             )
         }
 
-        /// High-performance async iterator with background pre-fetching.
+        /// Demand-driven async range iterator.
         ///
-        /// This iterator implements an optimized batching strategy:
-        ///
-        /// 1. **Immediate Pre-fetch**: Starts fetching the first batch during initialization
-        /// 2. **Background Pre-fetch**: While serving items from current batch, pre-fetches next batch
-        /// 3. **Minimal Blocking**: Only blocks when current batch is exhausted and next isn't ready
-        ///
-        /// ## Performance Benefits
-        ///
-        /// - **Overlapped I/O**: Network requests happen concurrently with data processing
-        /// - **Reduced Latency**: Pre-fetching hides network round-trip time
-        /// - **Memory Efficient**: Only keeps 1-2 batches in memory at any time
+        /// Swift `AsyncSequence` has no asynchronous early-exit hook. Fetching a
+        /// speculative next page would therefore allow database I/O to outlive a
+        /// caller's `break` or `return`. This iterator keeps one page and opens
+        /// the next page only from a subsequent `next()` call.
         ///
         /// ## Thread Safety
         ///
         /// This iterator is **not** thread-safe. Each iterator should be used by a single task.
         /// Multiple iterators can be created from the same sequence for concurrent processing.
         ///
-        /// ## Lifecycle Management
-        ///
-        /// This is a `class` (not `struct`) to enable automatic cleanup via `deinit`.
-        /// When iteration is abandoned (e.g., via `break` in a `for await` loop),
-        /// the background pre-fetch Task is automatically cancelled, preventing
-        /// "Operation issued while a commit was outstanding" errors.
-        public final class AsyncIterator: AsyncIteratorProtocol {
-            /// Transaction used for all range queries
-            private let transaction: TransactionProtocol
-            /// Key selector for the next batch (forward: begin, reverse: end)
-            private var nextBeginSelector: FDB.KeySelector
-            /// Key selector for the end boundary (forward: constant, reverse: updated)
-            private var nextEndSelector: FDB.KeySelector
-            /// Total limit for results (0 = unlimited)
-            private let limit: Int
-            /// Whether to scan in reverse order
-            private let reverse: Bool
-            /// Whether to use snapshot reads
-            private let snapshot: Bool
-            /// Streaming mode for batching
-            private let streamingMode: StreamingMode
+        public final class AsyncIterator: AsyncIteratorProtocol, Sendable {
+            private let iterationState: RangeIterationState
 
-            // MARK: - Internal State
-
-            /// Current batch of records being served
-            private var currentBatch: ResultRange = .init(records: [], more: true)
-            /// Index of next item to return from current batch
-            private var currentIndex: Int = 0
-            /// Total number of items returned so far
-            private var totalReturned: Int = 0
-            /// Current iteration number for ITERATOR streaming mode
-            private var iteration: Int = 1
-            /// Background task pre-fetching the next batch
-            private var preFetchTask: Task<ResultRange?, Error>?
-
-            /// Returns `true` when all available data has been consumed
-            private var isExhausted: Bool {
-                currentBatchExhausted && !currentBatch.more
-            }
-
-            /// Returns `true` when current batch has no more items to serve
-            private var currentBatchExhausted: Bool {
-                currentIndex >= currentBatch.records.count
-            }
-
-            /// Returns `true` if limit has been reached
-            private var limitReached: Bool {
-                limit > 0 && totalReturned >= limit
-            }
-
-            /// Remaining items to fetch considering limit
-            private var remainingLimit: Int {
-                guard limit > 0 else { return 0 }
-                return Swift.max(0, limit - totalReturned)
-            }
-
-            /// Cancels any running pre-fetch task when the iterator is deallocated.
-            ///
-            /// This ensures that abandoning iteration (e.g., via `break`) properly cleans up
-            /// background tasks, preventing conflicts with subsequent transaction operations.
-            deinit {
-                preFetchTask?.cancel()
-            }
-
-            /// Initializes the iterator and immediately starts pre-fetching the first batch.
+            /// Initializes the iterator without issuing database I/O.
             ///
             /// - Parameters:
             ///   - transaction: The transaction to use for range queries
@@ -232,148 +163,233 @@ extension FDB {
                 snapshot: Bool,
                 streamingMode: StreamingMode
             ) {
-                self.transaction = transaction
-                self.nextBeginSelector = beginSelector
-                self.nextEndSelector = endSelector
-                self.limit = limit
-                self.reverse = reverse
-                self.snapshot = snapshot
-                self.streamingMode = streamingMode
-
-                // Start fetching immediately to minimize latency on first next() call
-                startBackgroundPreFetch()
+                self.iterationState = RangeIterationState(
+                    transaction: transaction,
+                    beginSelector: beginSelector,
+                    endSelector: endSelector,
+                    limit: limit,
+                    reverse: reverse,
+                    snapshot: snapshot,
+                    streamingMode: streamingMode
+                )
             }
 
-            /// Cancels the pre-fetch task and waits for it to complete.
+            /// Completes iterator cleanup.
             ///
-            /// Call this method to ensure no in-flight FDB operations remain before
-            /// the transaction is committed. This is critical when wrapping this
-            /// iterator in another AsyncSequence that may return `nil` without
-            /// calling `next()` on the inner iterator (e.g., due to its own limit check).
-            ///
-            /// Combined with `withTaskCancellationHandler` in `Future.getAsync()`,
-            /// the C future is cancelled immediately, so this await completes quickly.
-            public func finish() async {
-                await cancelAndWaitForPreFetch()
-            }
-
-            private func cancelAndWaitForPreFetch() async {
-                guard let task = preFetchTask else { return }
-                preFetchTask = nil
-                task.cancel()
-                _ = try? await task.value
+            /// Reads are demand-driven and finish before `next()` returns, so no
+            /// background native operation remains to join.
+            public func finish(
+                isolation actor: isolated (any Actor)? = #isolation
+            ) async throws {
+                try await iterationState.finish()
             }
 
             /// Returns the next key-value pair in the sequence.
             ///
-            /// This method implements the core iteration logic with optimal performance:
+            /// This method implements demand-driven batch iteration:
             ///
             /// 1. If current batch has items, return next item immediately
-            /// 2. If current batch is exhausted, wait for pre-fetched batch
-            /// 3. Continue pre-fetching next batch in background
-            ///
-            /// The method only blocks on network I/O when transitioning between batches
-            /// and the next batch isn't ready yet.
+            /// 2. If current batch is exhausted, fetch the next page
+            /// 3. Return after the database read has completed
             ///
             /// - Returns: The next key-value pair, or `nil` if sequence is exhausted
             /// - Throws: `FDBError` if the database operation fails
             public func next() async throws -> Element? {
-                // Check if we've hit the limit
-                if limitReached {
-                    await cancelAndWaitForPreFetch()
+                try await iterationState.next()
+            }
+        }
+    }
+}
+
+private actor RangeIterationState {
+    private enum Lifecycle {
+        case idle
+        case reading(RangeReadCompletion, finishRequested: Bool)
+        case finished
+    }
+
+    private let transaction: any TransactionProtocol
+    private var nextBeginSelector: FDB.KeySelector
+    private var nextEndSelector: FDB.KeySelector
+    private let limit: Int
+    private let reverse: Bool
+    private let snapshot: Bool
+    private let streamingMode: FDB.StreamingMode
+    private var currentBatch: RangeBatch = .init(records: [], hasMore: true)
+    private var currentIndex = 0
+    private var totalReturned = 0
+    private var iteration = 1
+    private var lifecycle = Lifecycle.idle
+
+    init(
+        transaction: any TransactionProtocol,
+        beginSelector: FDB.KeySelector,
+        endSelector: FDB.KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: FDB.StreamingMode
+    ) {
+        self.transaction = transaction
+        self.nextBeginSelector = beginSelector
+        self.nextEndSelector = endSelector
+        self.limit = limit
+        self.reverse = reverse
+        self.snapshot = snapshot
+        self.streamingMode = streamingMode
+    }
+
+    func next() async throws -> (FDB.ByteString, FDB.ByteString)? {
+        while true {
+            switch lifecycle {
+            case .finished:
+                return nil
+            case .reading(let completion, _):
+                try await completion.wait().get()
+            case .idle:
+                if limitReached || isExhausted {
+                    lifecycle = .finished
                     return nil
                 }
-
-                if isExhausted {
-                    await cancelAndWaitForPreFetch()
-                    return nil
+                if !currentBatchExhausted {
+                    let keyValue = currentBatch.records[currentIndex]
+                    currentIndex += 1
+                    totalReturned += 1
+                    return keyValue
                 }
+                try await fetchNextBatch()
+            }
+        }
+    }
 
-                if currentBatchExhausted {
-                    try await updateCurrentBatch()
-                }
+    func finish() async throws {
+        while true {
+            switch lifecycle {
+            case .idle:
+                lifecycle = .finished
+                return
+            case .finished:
+                return
+            case .reading(let completion, false):
+                lifecycle = .reading(completion, finishRequested: true)
+                try await completion.wait().get()
+            case .reading(let completion, true):
+                try await completion.wait().get()
+            }
+        }
+    }
 
-                if currentBatchExhausted {
-                    // If last fetch didn't bring any new records, we've read everything.
-                    await cancelAndWaitForPreFetch()
-                    return nil
-                }
+    private var isExhausted: Bool {
+        currentBatchExhausted && !currentBatch.hasMore
+    }
 
-                let keyValue = currentBatch.records[currentIndex]
-                currentIndex += 1
-                totalReturned += 1
-                return keyValue
+    private var currentBatchExhausted: Bool {
+        currentIndex >= currentBatch.records.count
+    }
+
+    private var limitReached: Bool {
+        limit > 0 && totalReturned >= limit
+    }
+
+    private var remainingLimit: Int {
+        guard limit > 0 else { return 0 }
+        return Swift.max(0, limit - totalReturned)
+    }
+
+    private func fetchNextBatch() async throws {
+        let completion = RangeReadCompletion()
+        lifecycle = .reading(completion, finishRequested: false)
+        do {
+            let nextBatch = try await transaction.readRangeBatch(
+                from: nextBeginSelector,
+                to: nextEndSelector,
+                limit: remainingLimit,
+                targetBytes: 0,
+                streamingMode: streamingMode,
+                iteration: iteration,
+                reverse: reverse,
+                snapshot: snapshot
+            )
+            iteration += 1
+
+            guard case .reading(let activeCompletion, let finishRequested) = lifecycle,
+                  activeCompletion === completion else {
+                preconditionFailure("Range read lost its serialized lifecycle state")
+            }
+            if finishRequested {
+                lifecycle = .finished
+                completion.resolve(.success(()))
+                return
             }
 
-            /// Updates the current batch with pre-fetched data and starts next pre-fetch.
-            ///
-            /// This method is called when the current batch is exhausted and we need to
-            /// move to the next batch. It waits for the background pre-fetch task to complete,
-            /// updates the iterator state, and starts pre-fetching the subsequent batch.
-            ///
-            /// - Throws: `FDBError` if the pre-fetch operation failed
-            private func updateCurrentBatch() async throws {
-                guard let nextBatch = try await preFetchTask?.value else {
-                    throw FDBError(.clientError)
-                }
+            assert(currentIndex >= currentBatch.records.count)
+            currentBatch = nextBatch
+            currentIndex = 0
+            updateContinuationSelector(from: nextBatch)
+            lifecycle = .idle
+            completion.resolve(.success(()))
+        } catch {
+            lifecycle = .finished
+            completion.resolve(.failure(error))
+            throw error
+        }
+    }
 
-                assert(currentIndex >= currentBatch.records.count)
-                currentBatch = nextBatch
-                currentIndex = 0
+    private func updateContinuationSelector(
+        from nextBatch: borrowing RangeBatch
+    ) {
+        guard !currentBatch.records.isEmpty,
+              currentBatch.hasMore,
+              !limitReached,
+              let lastKey = nextBatch.records.last?.0 else {
+            return
+        }
+        if reverse {
+            nextEndSelector = .firstGreaterOrEqual(lastKey)
+        } else {
+            nextBeginSelector = .firstGreaterThan(lastKey)
+        }
+    }
+}
 
-                if !currentBatch.records.isEmpty, currentBatch.more, !limitReached {
-                    let lastKey = nextBatch.records.last!.0
-                    if reverse {
-                        // Reverse mode: scan from end toward begin
-                        // Update end selector to continue from last returned key
-                        // Reference: FDB Python binding uses firstGreaterOrEqual(lastKey)
-                        nextEndSelector = FDB.KeySelector.firstGreaterOrEqual(lastKey)
-                    } else {
-                        // Forward mode: scan from begin toward end
-                        // Update begin selector to continue after last returned key
-                        nextBeginSelector = FDB.KeySelector.firstGreaterThan(lastKey)
-                    }
-                    startBackgroundPreFetch()
-                } else {
-                    preFetchTask = nil
+private final class RangeReadCompletion: Sendable {
+    private struct MutableState: Sendable {
+        var result: Result<Void, any Error>?
+        var waiters: [CheckedContinuation<Result<Void, any Error>, Never>] = []
+    }
+
+    private let state = Mutex(MutableState())
+
+    func wait() async -> Result<Void, any Error> {
+        let completed = state.withLock { $0.result }
+        if let completed {
+            return completed
+        }
+        return await withCheckedContinuation { continuation in
+            let racedResult = state.withLock { state
+                -> Result<Void, any Error>? in
+                if let result = state.result {
+                    return result
                 }
+                state.waiters.append(continuation)
+                return nil
             }
-
-            /// Starts background pre-fetching of the next batch.
-            ///
-            /// This method creates a background Task that performs the next range query
-            /// concurrently. The task captures all necessary values to avoid reference
-            /// cycles and ensure thread safety.
-            ///
-            /// The pre-fetch runs independently and can complete while the iterator
-            /// is serving items from the current batch, minimizing blocking time
-            /// during batch transitions.
-            private func startBackgroundPreFetch() {
-                let capturedTransaction = transaction
-                let capturedBeginSelector = nextBeginSelector
-                let capturedEndSelector = nextEndSelector
-                let capturedLimit = remainingLimit
-                let capturedReverse = reverse
-                let capturedSnapshot = snapshot
-                let capturedStreamingMode = streamingMode
-                let capturedIteration = iteration
-
-                preFetchTask = Task {
-                    return try await capturedTransaction.getRangeNative(
-                        beginSelector: capturedBeginSelector,
-                        endSelector: capturedEndSelector,
-                        limit: capturedLimit,
-                        targetBytes: 0,
-                        streamingMode: capturedStreamingMode,
-                        iteration: capturedIteration,
-                        reverse: capturedReverse,
-                        snapshot: capturedSnapshot
-                    )
-                }
-
-                // Increment iteration for next fetch (ITERATOR mode optimization)
-                iteration += 1
+            if let racedResult {
+                continuation.resume(returning: racedResult)
             }
+        }
+    }
+
+    func resolve(_ result: Result<Void, any Error>) {
+        let waiters = state.withLock { state in
+            precondition(state.result == nil, "Range read completed more than once")
+            state.result = result
+            let waiters = state.waiters
+            state.waiters.removeAll(keepingCapacity: false)
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume(returning: result)
         }
     }
 }

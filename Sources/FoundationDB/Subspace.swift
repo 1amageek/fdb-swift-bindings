@@ -232,8 +232,7 @@ public struct Subspace: Sendable {
     ///
     /// - ✅ **Recommended**: Use with tuple-encoded data via `init(rootPrefix:)` or `subspace(_:)`
     /// - ⚠️ **Caution**: Avoid raw binary prefixes ending in 0xFF bytes
-    /// - 💡 **Alternative**: For raw binary prefix ranges, consider using a strinc-based
-    ///   method (to be provided in future versions)
+    /// - 💡 **Alternative**: For raw binary prefix ranges, use ``prefixRange()``.
     ///
     /// ## Example (Tuple-Encoded Data)
     ///
@@ -246,8 +245,9 @@ public struct Subspace: Sendable {
     ///     from: begin,
     ///     to: end
     /// )
-    /// for try await (key, value) in sequence {
+    /// for try await row in sequence {
     ///     // Process each user key-value pair
+    ///     print(row.key, row.value)
     /// }
     /// ```
     ///
@@ -380,9 +380,10 @@ extension Subspace {
     ///     // end   = [0x02]
     ///
     ///     let sequence = transaction.getRange(beginKey: begin, endKey: end)
-    ///     for try await (key, value) in sequence {
+    ///     for try await row in sequence {
     ///         // Process all keys starting with [0x01, 0xFF]
     ///         // Including [0x01, 0xFF, 0xFF, 0x00] and beyond
+    ///         print(row.key, row.value)
     ///     }
     /// } catch SubspaceError.cannotIncrementKey(let message) {
     ///     print("Cannot create range: \(message)")

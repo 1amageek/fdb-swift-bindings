@@ -105,7 +105,7 @@ struct FoundationDBResultStorageSharingTests {
         var future: Future<RangeBatchResultDecoder>? = Future<RangeBatchResultDecoder>(rangeFuture)
         var batch: RangeBatch? = try await future?.value
         #expect(batch?.records.count == 2)
-        var decodedRecords: FDB.KeyValueArray? = batch?.records
+        var decodedRecords: [FDB.KeyValue]? = batch?.records
 
         var sourceRecords: UnsafePointer<FDBKeyValue>?
         var sourceRecordCount: Int32 = 0
@@ -136,19 +136,19 @@ struct FoundationDBResultStorageSharingTests {
             let sourceValueStorageIdentity = try #require(
                 sourceRecord.value.map(UInt.init(bitPattern:))
             )
-            let decodedKeyStorageIdentity = decodedRecord.0.withUnsafeBytes {
+            let decodedKeyStorageIdentity = decodedRecord.key.withUnsafeBytes {
                 $0.baseAddress.map(UInt.init(bitPattern:))
             }
-            let decodedValueStorageIdentity = decodedRecord.1.withUnsafeBytes {
+            let decodedValueStorageIdentity = decodedRecord.value.withUnsafeBytes {
                 $0.baseAddress.map(UInt.init(bitPattern:))
             }
 
-            #expect(Int(sourceRecord.key_length) == decodedRecord.0.count)
-            #expect(Int(sourceRecord.value_length) == decodedRecord.1.count)
+            #expect(Int(sourceRecord.key_length) == decodedRecord.key.count)
+            #expect(Int(sourceRecord.value_length) == decodedRecord.value.count)
             #expect(decodedKeyStorageIdentity == sourceKeyStorageIdentity)
             #expect(decodedValueStorageIdentity == sourceValueStorageIdentity)
-            #expect(decodedRecord.0 == expectedRows[index].0)
-            #expect(decodedRecord.1 == expectedRows[index].1)
+            #expect(decodedRecord.key == expectedRows[index].0)
+            #expect(decodedRecord.value == expectedRows[index].1)
         }
 
         var retainedRecord = try #require(decodedRecords?.first)
@@ -174,19 +174,19 @@ struct FoundationDBResultStorageSharingTests {
         let sourceValueStorageIdentity = try #require(
             firstSourceRecord.value.map(UInt.init(bitPattern:))
         )
-        let retainedKeyStorageIdentity = retainedRecord.0.withUnsafeBytes {
+        let retainedKeyStorageIdentity = retainedRecord.key.withUnsafeBytes {
             $0.baseAddress.map(UInt.init(bitPattern:))
         }
-        let retainedValueStorageIdentity = retainedRecord.1.withUnsafeBytes {
+        let retainedValueStorageIdentity = retainedRecord.value.withUnsafeBytes {
             $0.baseAddress.map(UInt.init(bitPattern:))
         }
 
         #expect(retainedKeyStorageIdentity == sourceKeyStorageIdentity)
         #expect(retainedValueStorageIdentity == sourceValueStorageIdentity)
-        #expect(retainedRecord.0 == firstKey)
-        #expect(retainedRecord.1 == firstValue)
+        #expect(retainedRecord.key == firstKey)
+        #expect(retainedRecord.value == firstValue)
 
-        retainedRecord = (FDB.ByteString([]), FDB.ByteString([]))
+        retainedRecord = FDB.KeyValue(key: [], value: [])
     }
 
     @Test("Input sources are borrowed once and copied by the C call")

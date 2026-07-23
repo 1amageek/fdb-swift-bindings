@@ -31,9 +31,6 @@ public enum FDB {
     /// Raw byte data used throughout the FoundationDB API.
     public typealias Bytes = [UInt8]
 
-    /// An array of owner-backed key-value views.
-    public typealias KeyValueArray = [(ByteString, ByteString)]
-
     /// Protocol for types that can be converted to key selectors.
     ///
     /// Types conforming to this protocol can be used in range operations
@@ -78,6 +75,13 @@ public enum FDB {
             self.offset = offset
         }
 
+        /// Creates a selector that retains an immutable owner-backed key.
+        public init(key: ByteString, orEqual: Bool, offset: Int) {
+            self.key = key
+            self.orEqual = orEqual
+            self.offset = offset
+        }
+
         /// Returns this key selector (identity function).
         ///
         /// - Returns: This key selector instance.
@@ -95,12 +99,20 @@ public enum FDB {
             return KeySelector(key: key, orEqual: false, offset: 1)
         }
 
+        public static func firstGreaterOrEqual(_ key: ByteString) -> KeySelector {
+            KeySelector(key: key, orEqual: false, offset: 1)
+        }
+
         /// Creates a key selector for the first key greater than the given key.
         ///
         /// - Parameter key: The reference key as a byte array.
         /// - Returns: A key selector that selects the first key > the reference key.
         public static func firstGreaterThan<Key: ByteInput>(_ key: Key) -> KeySelector {
             return KeySelector(key: key, orEqual: true, offset: 1)
+        }
+
+        public static func firstGreaterThan(_ key: ByteString) -> KeySelector {
+            KeySelector(key: key, orEqual: true, offset: 1)
         }
 
         /// Creates a key selector for the last key less than or equal to the given key.
@@ -111,12 +123,20 @@ public enum FDB {
             return KeySelector(key: key, orEqual: true, offset: 0)
         }
 
+        public static func lastLessOrEqual(_ key: ByteString) -> KeySelector {
+            KeySelector(key: key, orEqual: true, offset: 0)
+        }
+
         /// Creates a key selector for the last key less than the given key.
         ///
         /// - Parameter key: The reference key as a byte array.
         /// - Returns: A key selector that selects the last key < the reference key.
         public static func lastLessThan<Key: ByteInput>(_ key: Key) -> KeySelector {
             return KeySelector(key: key, orEqual: false, offset: 0)
+        }
+
+        public static func lastLessThan(_ key: ByteString) -> KeySelector {
+            KeySelector(key: key, orEqual: false, offset: 0)
         }
     }
 

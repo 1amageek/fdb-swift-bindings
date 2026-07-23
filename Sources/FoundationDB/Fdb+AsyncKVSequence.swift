@@ -36,21 +36,21 @@ extension FDB {
     ///
     /// ```swift
     /// // Basic forward scan
-    /// for try await (key, value) in transaction.getRange(
+    /// for try await row in transaction.getRange(
     ///     from: .firstGreaterOrEqual("user:"),
     ///     to: .firstGreaterOrEqual("user;")
     /// ) {
-    ///     print(key, value)
+    ///     print(row.key, row.value)
     /// }
     ///
     /// // Reverse scan with limit
-    /// for try await (key, value) in transaction.getRange(
+    /// for try await row in transaction.getRange(
     ///     from: .firstGreaterOrEqual("user:"),
     ///     to: .firstGreaterOrEqual("user;"),
     ///     limit: 10,
     ///     reverse: true
     /// ) {
-    ///     print(key, value)
+    ///     print(row.key, row.value)
     /// }
     /// ```
     ///
@@ -69,7 +69,7 @@ extension FDB {
     /// 3. Leaves no in-flight read after `next()` returns
     /// 4. Tracks iteration count internally for ITERATOR streaming mode optimization
     public struct AsyncKVSequence: AsyncSequence, Sendable {
-        public typealias Element = (ByteString, ByteString)
+        public typealias Element = KeyValue
 
         /// The transaction used for range queries
         let transaction: TransactionProtocol
@@ -239,7 +239,7 @@ private actor RangeIterationState {
         self.streamingMode = streamingMode
     }
 
-    func next() async throws -> (FDB.ByteString, FDB.ByteString)? {
+    func next() async throws -> FDB.KeyValue? {
         while true {
             switch lifecycle {
             case .finished:
@@ -341,7 +341,7 @@ private actor RangeIterationState {
         guard !currentBatch.records.isEmpty,
               currentBatch.hasMore,
               !limitReached,
-              let lastKey = nextBatch.records.last?.0 else {
+              let lastKey = nextBatch.records.last?.key else {
             return
         }
         if reverse {

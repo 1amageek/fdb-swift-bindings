@@ -942,9 +942,9 @@ public final class DirectoryLayer: Sendable {
             snapshot: true
         )
 
-        for try await (key, _) in sequence {
+        for try await row in sequence {
             do {
-                let tuple = try subdirsSubspace.unpack(Array(key))
+                let tuple = try subdirsSubspace.unpack(Array(row.key))
                 if let childName = tuple[0] as? String {
                     children.insert(childName)
                 }
@@ -1271,13 +1271,13 @@ public final class DirectoryLayer: Sendable {
         let subdirsSubspace = node.subspace(Self.subdirs)
         let (begin, end) = subdirsSubspace.range()
 
-        for try await (key, value) in transaction.getRange(
+        for try await row in transaction.getRange(
             from: begin,
             to: end,
             snapshot: false
         ) {
             // value is the RELATIVE prefix of a subdirectory
-            let relativePrefix = value
+            let relativePrefix = row.value
 
             // Convert to ABSOLUTE prefix for comparison
             let existingAbsolutePrefix = contentSubspace.prefix + relativePrefix
@@ -1295,7 +1295,7 @@ public final class DirectoryLayer: Sendable {
             // IMPORTANT: Recursively check this subdirectory's children
             // We must check ALL levels, not just direct subdirs
             // Extract child name from key: node[SUBDIRS][childName]
-            let keyTuple = try subdirsSubspace.unpack(key.copyBytes())
+            let keyTuple = try subdirsSubspace.unpack(row.key.copyBytes())
             guard keyTuple.count > 0, let childName = keyTuple[0] as? String else {
                 throw TupleError.invalidDecoding("Directory metadata contains an invalid child key")
             }

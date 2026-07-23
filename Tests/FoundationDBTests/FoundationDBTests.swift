@@ -357,7 +357,7 @@ func getKeyWithKeySelector() async throws {
     let resultKey = try await readTransaction.getKey(selector: selector)
     let expectedKey = [UInt8]("test_getkey_b".utf8)
     #expect(
-        resultKey?.copyBytes() == expectedKey,
+        resultKey.copyBytes() == expectedKey,
         "getKey with KeySelector should find exact key"
     )
 }
@@ -384,7 +384,7 @@ func getKeyWithDifferentSelectors() async throws {
     let selectorGTE = FDB.KeySelector.firstGreaterOrEqual("test_selector_b")
     let resultGTE = try await readTransaction.getKey(selector: selectorGTE)
     #expect(
-        resultGTE?.copyBytes() == [UInt8]("test_selector_b".utf8),
+        resultGTE.copyBytes() == [UInt8]("test_selector_b".utf8),
         "firstGreaterOrEqual should find exact key"
     )
 
@@ -392,7 +392,7 @@ func getKeyWithDifferentSelectors() async throws {
     let selectorGT = FDB.KeySelector.firstGreaterThan("test_selector_b")
     let resultGT = try await readTransaction.getKey(selector: selectorGT)
     #expect(
-        resultGT?.copyBytes() == [UInt8]("test_selector_c".utf8),
+        resultGT.copyBytes() == [UInt8]("test_selector_c".utf8),
         "firstGreaterThan should find next key"
     )
 
@@ -400,7 +400,7 @@ func getKeyWithDifferentSelectors() async throws {
     let selectorLTE = FDB.KeySelector.lastLessOrEqual("test_selector_b")
     let resultLTE = try await readTransaction.getKey(selector: selectorLTE)
     #expect(
-        resultLTE?.copyBytes() == [UInt8]("test_selector_b".utf8),
+        resultLTE.copyBytes() == [UInt8]("test_selector_b".utf8),
         "lastLessOrEqual should find exact key"
     )
 
@@ -408,7 +408,7 @@ func getKeyWithDifferentSelectors() async throws {
     let selectorLT = FDB.KeySelector.lastLessThan("test_selector_b")
     let resultLT = try await readTransaction.getKey(selector: selectorLT)
     #expect(
-        resultLT?.copyBytes() == [UInt8]("test_selector_a".utf8),
+        resultLT.copyBytes() == [UInt8]("test_selector_a".utf8),
         "lastLessThan should find previous key"
     )
 }
@@ -433,12 +433,12 @@ func getKeyWithSelectable() async throws {
 
     // Test with FDB.Bytes (which implements Selectable)
     let resultWithKey = try await readTransaction.getKey(selector: key)
-    #expect(resultWithKey?.copyBytes() == key, "getKey with FDB.Bytes should work")
+    #expect(resultWithKey.copyBytes() == key, "getKey with FDB.Bytes should work")
 
     // Test with String (which implements Selectable)
     let stringKey = "test_selectable_key"
     let resultWithString = try await readTransaction.getKey(selector: stringKey)
-    #expect(resultWithString?.copyBytes() == key, "getKey with String should work")
+    #expect(resultWithString.copyBytes() == key, "getKey with String should work")
 }
 
 @Test("commit transaction")
@@ -453,8 +453,7 @@ func testCommit() async throws {
 
     let newTransaction = try database.createTransaction()
     try newTransaction.setValue("test_commit_value", for: "test_commit_key")
-    let commitResult = try await newTransaction.commit()
-    #expect(commitResult == true, "Commit should return true on success")
+    try await newTransaction.commit()
 
     // Verify the value was committed by reading in a new transaction
     let readTransaction = try database.createTransaction()
@@ -465,22 +464,24 @@ func testCommit() async throws {
     )
 }
 
-// @Test("getVersionstamp")
-// func testGetVersionstamp() async throws {
-//     try await FDBClient.maybeInitialize()
-//     let database = try FDBClient.openTestDatabase()
-//     let transaction = try database.createTransaction()
+@Test("transaction versionstamp is requested before commit and resolved after it")
+func transactionVersionstampResolvesAfterCommit() async throws {
+    try await FDBClient.maybeInitialize()
+    let database = try FDBClient.openTestDatabase()
+    let key = "transaction_versionstamp_\(UInt64.random(in: 0...UInt64.max))"
+    let transaction = try database.createTransaction()
+    let pendingVersionstamp = transaction.requestVersionstamp()
 
-//     // Clear test key range
-//     transaction.clearRange(beginKey: "test_", endKey: "test`")
-//     _ = try await transaction.commit()
+    try transaction.setValue("value", for: key)
+    try await transaction.commit()
 
-//     let newTransaction = try database.createTransaction()
-//     newTransaction.setValue("test_versionstamp_value", for: "test_versionstamp_key")
-//     let versionstamp = try await newTransaction.getVersionstamp()
-//     #expect(versionstamp != nil, "Versionstamp should not be nil")
-//     #expect(versionstamp?.count == 10, "Versionstamp should be 10 bytes")
-// }
+    let versionstamp = try await pendingVersionstamp.value
+    #expect(versionstamp.bytes.count == FDB.TransactionVersionstamp.byteCount)
+
+    try await database.withTransaction { cleanupTransaction in
+        try cleanupTransaction.clear(key: key)
+    }
+}
 
 @Test("cancel transaction")
 func testCancel() async throws {
@@ -585,11 +586,11 @@ func getRangeBytes() async throws {
     )
 
     // Sort results by key for predictable testing
-    let sortedResults = result.records.sorted { $0.0.lexicographicallyPrecedes($1.0) }
-    #expect(sortedResults[0].0 == key1, "First key should match key1")
-    #expect(sortedResults[0].1 == value1, "First value should match value1")
-    #expect(sortedResults[1].0 == key2, "Second key should match key2")
-    #expect(sortedResults[1].1 == value2, "Second value should match value2")
+    let sortedResults = result.records.sorted { $0.key.lexicographicallyPrecedes($1.key) }
+    #expect(sortedResults[0].key == key1, "First key should match key1")
+    #expect(sortedResults[0].value == value1, "First value should match value1")
+    #expect(sortedResults[1].key == key2, "Second key should match key2")
+    #expect(sortedResults[1].value == value2, "Second value should match value2")
 }
 
 @Test("getRange with limit")
@@ -622,18 +623,18 @@ func getRangeWithLimit() async throws {
     #expect(result.records.count == 3, "Should return exactly 3 key-value pairs due to limit")
 
     // Verify we got the first 3 keys
-    let sortedResults = result.records.sorted { String(bytes: $0.0) < String(bytes: $1.0) }
+    let sortedResults = result.records.sorted { String(bytes: $0.key) < String(bytes: $1.key) }
 
     #expect(
-        String(bytes: sortedResults[0].0) == "test_limit_key_001",
+        String(bytes: sortedResults[0].key) == "test_limit_key_001",
         "First key should be test_limit_key_001"
     )
     #expect(
-        String(bytes: sortedResults[1].0) == "test_limit_key_002",
+        String(bytes: sortedResults[1].key) == "test_limit_key_002",
         "Second key should be test_limit_key_002"
     )
     #expect(
-        String(bytes: sortedResults[2].0) == "test_limit_key_003",
+        String(bytes: sortedResults[2].key) == "test_limit_key_003",
         "Third key should be test_limit_key_003"
     )
 }
@@ -704,11 +705,11 @@ func readRangeBatchWithKeySelectors() async throws {
     )
 
     // Sort results by key for predictable testing
-    let sortedResults = result.records.sorted { $0.0.lexicographicallyPrecedes($1.0) }
-    #expect(sortedResults[0].0 == key1, "First key should match key1")
-    #expect(sortedResults[0].1 == value1, "First value should match value1")
-    #expect(sortedResults[1].0 == key2, "Second key should match key2")
-    #expect(sortedResults[1].1 == value2, "Second value should match value2")
+    let sortedResults = result.records.sorted { $0.key.lexicographicallyPrecedes($1.key) }
+    #expect(sortedResults[0].key == key1, "First key should match key1")
+    #expect(sortedResults[0].value == value1, "First value should match value1")
+    #expect(sortedResults[1].key == key2, "Second key should match key2")
+    #expect(sortedResults[1].value == value2, "Second value should match value2")
 }
 
 @Test("getRange with KeySelectors - String keys")
@@ -747,8 +748,8 @@ func getRangeWithStringSelectorKeys() async throws {
     try #require(result.records.count == 2, "Should return 2 key-value pairs")
 
     // Convert back to strings for easier testing
-    let keys = result.records.map { String(bytes: $0.0) }.sorted()
-    _ = result.records.map { String(bytes: $0.1) } // values not used in this test
+    let keys = result.records.map { String(bytes: $0.key) }.sorted()
+    _ = result.records.map { String(bytes: $0.value) } // values not used in this test
 
     #expect(keys.contains("test_str_selector_001"), "Should contain first key")
     #expect(keys.contains("test_str_selector_002"), "Should contain second key")
@@ -786,7 +787,7 @@ func getRangeWithSelectable() async throws {
     #expect(!result.hasMore)
     try #require(result.records.count == 2, "Should return 2 key-value pairs")
 
-    let keys = result.records.map { String(bytes: $0.0) }.sorted()
+    let keys = result.records.map { String(bytes: $0.key) }.sorted()
     #expect(keys.contains("test_mixed_001"), "Should contain first key")
     #expect(keys.contains("test_mixed_002"), "Should contain second key")
 }
@@ -837,11 +838,11 @@ func keySelectorMethods() async throws {
     )
 
     // firstGreaterOrEqual should include test_offset_002
-    let keysGTE = resultGTE.records.map { String(bytes: $0.0) }.sorted()
+    let keysGTE = resultGTE.records.map { String(bytes: $0.key) }.sorted()
     #expect(keysGTE.contains("test_offset_002"), "firstGreaterOrEqual should include the key")
 
     // firstGreaterThan should exclude test_offset_002 and start from test_offset_003
-    let keysGT = resultGT.records.map { String(bytes: $0.0) }.sorted()
+    let keysGT = resultGT.records.map { String(bytes: $0.key) }.sorted()
     #expect(!keysGT.contains("test_offset_002"), "firstGreaterThan should exclude the key")
     #expect(keysGT.contains("test_offset_003"), "firstGreaterThan should include next key")
 }
@@ -1447,8 +1448,8 @@ func getRangeWithKeySelectors() async throws {
 
     var count = 0
     for try await kv in asyncSequence {
-        let key = String(bytes: kv.0)
-        let value = String(bytes: kv.1)
+        let key = String(bytes: kv.key)
+        let value = String(bytes: kv.value)
 
         // Verify the keys are in order and as expected
         let expected_key = "test_read_range_" + String(count + 15).leftPad(toLength: 3, withPad: "0")
@@ -1500,8 +1501,8 @@ func getRangeAsyncIteratorTraversesBoundedRange() async throws {
 
     // Read records one by one to test iterator behavior
     while let kv = try await iterator.next() {
-        let key = String(bytes: kv.0)
-        let value = String(bytes: kv.1)
+        let key = String(bytes: kv.key)
+        let value = String(bytes: kv.value)
         records.append((key, value))
 
         // Stop at reasonable count to verify behavior
@@ -1887,8 +1888,7 @@ func addReadConflictRange() async throws {
     try transaction.addConflictRange(beginKey: beginKey, endKey: endKey, type: .read)
 
     // Should be able to commit successfully
-    let result = try await transaction.commit()
-    #expect(result == true, "Transaction with read conflict range should commit successfully")
+    try await transaction.commit()
 }
 
 @Test("addConflictRange write conflict")
@@ -1910,8 +1910,7 @@ func addWriteConflictRange() async throws {
     try transaction.addConflictRange(beginKey: beginKey, endKey: endKey, type: .write)
 
     // Should be able to commit successfully
-    let result = try await transaction.commit()
-    #expect(result == true, "Transaction with write conflict range should commit successfully")
+    try await transaction.commit()
 }
 
 @Test("addConflictRange detects concurrent write conflicts")
@@ -1980,8 +1979,7 @@ func addMultipleConflictRanges() async throws {
     try transaction.addConflictRange(beginKey: beginKey3, endKey: endKey3, type: .write)
 
     // Should be able to commit with multiple conflict ranges
-    let result = try await transaction.commit()
-    #expect(result == true, "Transaction with multiple conflict ranges should commit successfully")
+    try await transaction.commit()
 }
 
 @Test("ConflictRangeType enum values")
@@ -2028,7 +2026,7 @@ func readRangeBatchReverse() async throws {
     #expect(result.records.count == 5, "Should return all 5 records")
 
     // Verify descending order
-    let keys = result.records.map { String(bytes: $0.0) }
+    let keys = result.records.map { String(bytes: $0.key) }
     #expect(keys[0] == "rangetest_reverse_005", "First key should be the largest")
     #expect(keys[1] == "rangetest_reverse_004", "Second key should be second largest")
     #expect(keys[4] == "rangetest_reverse_001", "Last key should be the smallest")
@@ -2066,7 +2064,7 @@ func readRangeBatchReverseWithLimit() async throws {
     #expect(result.records.count == 3, "Should return exactly 3 records due to limit")
 
     // Verify we got the last 3 keys in descending order
-    let keys = result.records.map { String(bytes: $0.0) }
+    let keys = result.records.map { String(bytes: $0.key) }
     #expect(keys[0] == "rangetest_rev_limit_010", "First should be key 010")
     #expect(keys[1] == "rangetest_rev_limit_009", "Second should be key 009")
     #expect(keys[2] == "rangetest_rev_limit_008", "Third should be key 008")
@@ -2092,12 +2090,12 @@ func rangeReadsInReverseOrder() async throws {
     let transaction = try database.createTransaction()
     var keys: [String] = []
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: .firstGreaterOrEqual("rangetest_async_rev_"),
         to: .firstGreaterOrEqual("rangetest_async_rev`"),
         reverse: true
     ) {
-        keys.append(String(bytes: key))
+        keys.append(String(bytes: row.key))
     }
 
     #expect(keys.count == 5, "Should return all 5 records")
@@ -2125,13 +2123,13 @@ func reverseRangeHonorsLimit() async throws {
     let transaction = try database.createTransaction()
     var keys: [String] = []
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: .firstGreaterOrEqual("rangetest_asyncrevlim_"),
         to: .firstGreaterOrEqual("rangetest_asyncrevlim`"),
         limit: 5,
         reverse: true
     ) {
-        keys.append(String(bytes: key))
+        keys.append(String(bytes: row.key))
     }
 
     #expect(keys.count == 5, "Should return exactly 5 records due to limit")
@@ -2191,13 +2189,13 @@ func reverseRangeContinuesAcrossBatches() async throws {
     let transaction = try database.createTransaction()
     var keys: [String] = []
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: .firstGreaterOrEqual("rangetest_rev_batch_"),
         to: .firstGreaterOrEqual("rangetest_rev_batch`"),
         reverse: true,
         streamingMode: .small  // Use small batches to ensure multiple fetches
     ) {
-        keys.append(String(bytes: key))
+        keys.append(String(bytes: row.key))
     }
 
     #expect(keys.count == 100, "Should return all 100 records")
@@ -2233,12 +2231,12 @@ func forwardRangeHonorsLimit() async throws {
     let transaction = try database.createTransaction()
     var keys: [String] = []
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: .firstGreaterOrEqual("rangetest_fwd_limit_"),
         to: .firstGreaterOrEqual("rangetest_fwd_limit`"),
         limit: 5
     ) {
-        keys.append(String(bytes: key))
+        keys.append(String(bytes: row.key))
     }
 
     #expect(keys.count == 5, "Should return exactly 5 records due to limit")
@@ -2266,13 +2264,13 @@ func forwardRangeContinuesUntilLimit() async throws {
     let transaction = try database.createTransaction()
     var keys: [String] = []
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: .firstGreaterOrEqual("rangetest_fwd_batch_"),
         to: .firstGreaterOrEqual("rangetest_fwd_batch`"),
         limit: 50,
         streamingMode: .small
     ) {
-        keys.append(String(bytes: key))
+        keys.append(String(bytes: row.key))
     }
 
     #expect(keys.count == 50, "Should return exactly 50 records due to limit")
@@ -2311,14 +2309,14 @@ func getRangeWithBytesKeys() async throws {
     let transaction = try database.createTransaction()
     var count = 0
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: prefix,
         to: endPrefix,
         limit: 3
     ) {
         count += 1
         if count == 1 {
-            let keyStr = String(bytes: key)
+            let keyStr = String(bytes: row.key)
             #expect(keyStr == "rangetest_bytes_range_001", "First key should be 001")
         }
     }
@@ -2349,12 +2347,12 @@ func getRangeWithBytesKeysReverse() async throws {
     let transaction = try database.createTransaction()
     var keys: [String] = []
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: prefix,
         to: endPrefix,
         reverse: true
     ) {
-        keys.append(String(bytes: key))
+        keys.append(String(bytes: row.key))
     }
 
     #expect(keys.count == 5, "Should return all 5 records")
@@ -2395,7 +2393,7 @@ func readRangeBatchWithBytesAllParams() async throws {
     )
 
     #expect(result.records.count == 5, "Should return 5 records due to limit")
-    let firstKey = String(bytes: result.records[0].0)
+    let firstKey = String(bytes: result.records[0].key)
     #expect(firstKey == "rangetest_database_bytes_010", "First key should be largest")
 }
 
@@ -2505,13 +2503,13 @@ func getRangeReverseWithSnapshotMode() async throws {
     let transaction = try database.createTransaction()
     var keys: [String] = []
 
-    for try await (key, _) in transaction.getRange(
+    for try await row in transaction.getRange(
         from: .firstGreaterOrEqual("rangetest_snap_rev_"),
         to: .firstGreaterOrEqual("rangetest_snap_rev`"),
         reverse: true,
         snapshot: true
     ) {
-        keys.append(String(bytes: key))
+        keys.append(String(bytes: row.key))
     }
 
     #expect(keys.count == 5, "Should return all 5 records")

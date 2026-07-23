@@ -203,14 +203,14 @@ public final class HighContentionAllocator: Sendable {
             snapshot: true
         )
 
-        for try await (key, _) in sequence {
+        for try await row in sequence {
             // Check if key belongs to counters subspace before unpacking
-            guard key.starts(with: counters.prefix) else {
+            guard row.key.starts(with: counters.prefix) else {
                 // Key is outside counters subspace, skip it
                 continue
             }
 
-            let tuple = try counters.unpack(Array(key))
+            let tuple = try counters.unpack(Array(row.key))
             if let start = tuple[0] as? Int64 {
                 return start
             }

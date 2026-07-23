@@ -27,6 +27,36 @@ enum BindingTestInterpreterError: Error {
     case missingRecordedTransactionVersion
     case invalidMutationName
     case unsupportedMutation(String)
+    case invalidStreamingMode(Int64)
+    case integerOutOfRange(parameter: String, value: Int64)
+}
+
+private protocol PendingStackValue {
+    func resolve() async throws -> Any
+}
+
+private struct PendingCommitResult: PendingStackValue {
+    private let task: Task<Void, Error>
+
+    init(transaction: any TransactionProtocol) {
+        self.task = Task {
+            try await transaction.commit()
+        }
+    }
+
+    func resolve() async throws -> Any {
+        try await task.value
+        return Array("RESULT_NOT_PRESENT".utf8)
+    }
+}
+
+private struct PendingVersionstampResult: PendingStackValue {
+    let pendingVersionstamp: any FDB.PendingTransactionVersionstamp
+
+    func resolve() async throws -> Any {
+        let versionstamp = try await pendingVersionstamp.value
+        return versionstamp.bytes.copyBytes()
+    }
 }
 
 // Value produced while executing one binding-test instruction.
@@ -51,12 +81,29 @@ class BindingTestInterpreter {
     }
 
     // Remove the most recently produced stack value.
-    func popStackEntry() -> StackEntry {
+    func popStackEntry() async throws -> StackEntry {
         guard !stack.isEmpty else {
             fatalError("Stack is empty")
         }
 
-        let entry = stack.removeLast()
+        var entry = stack.removeLast()
+
+        if let pendingValue = entry.value as? any PendingStackValue {
+            do {
+                entry = StackEntry(
+                    value: try await pendingValue.resolve(),
+                    instructionIndex: entry.instructionIndex
+                )
+            } catch let error as FDBError {
+                entry = StackEntry(
+                    value: Tuple([
+                        Array("ERROR".utf8),
+                        Array(String(error.code).utf8),
+                    ]).pack(),
+                    instructionIndex: entry.instructionIndex
+                )
+            }
+        }
 
         // Handle futures and convert types like in Go
         switch entry.value {
@@ -106,19 +153,19 @@ class BindingTestInterpreter {
     // Pack range results according to the binding-tester stack contract.
     func pushRangeRecords(
         _ instructionIndex: Int,
-        _ records: FDB.KeyValueArray,
+        _ records: [FDB.KeyValue],
         prefixFilter: [UInt8]? = nil
     ) {
         var tupleElements: [any TupleElement] = []
-        for (key, value) in records {
+        for record in records {
             if let prefix = prefixFilter {
-                if key.starts(with: prefix) {
-                    tupleElements.append(key.copyBytes())
-                    tupleElements.append(value.copyBytes())
+                if record.key.starts(with: prefix) {
+                    tupleElements.append(record.key.copyBytes())
+                    tupleElements.append(record.value.copyBytes())
                 }
             } else {
-                tupleElements.append(key.copyBytes())
-                tupleElements.append(value.copyBytes())
+                tupleElements.append(record.key.copyBytes())
+                tupleElements.append(record.value.copyBytes())
             }
         }
         let tuple = Tuple(tupleElements)
@@ -126,14 +173,60 @@ class BindingTestInterpreter {
     }
 
     // Constrain a key result to the requested prefix range.
-    func constrainKeyToPrefix(_ key: FDB.ByteString, prefix: [UInt8]) -> [UInt8] {
+    func constrainKeyToPrefix(
+        _ key: FDB.ByteString,
+        prefix: [UInt8]
+    ) throws -> [UInt8] {
         if key.starts(with: prefix) {
             return key.copyBytes()
         } else if key.lexicographicallyPrecedes(prefix) {
             return prefix
         } else {
-            return prefix + [0xFF]
+            return try FDB.strinc(prefix)
         }
+    }
+
+    func streamingMode(from value: Int64) throws -> FDB.StreamingMode {
+        guard let rawValue = Int32(exactly: value),
+              let streamingMode = FDB.StreamingMode(rawValue: rawValue) else {
+            throw BindingTestInterpreterError.invalidStreamingMode(value)
+        }
+        return streamingMode
+    }
+
+    func integer(from value: Int64, named parameter: String) throws -> Int {
+        guard let integer = Int(exactly: value) else {
+            throw BindingTestInterpreterError.integerOutOfRange(
+                parameter: parameter,
+                value: value
+            )
+        }
+        return integer
+    }
+
+    func readRangeRecords(
+        transaction: any TransactionProtocol,
+        from begin: FDB.KeySelector,
+        to end: FDB.KeySelector,
+        limit: Int,
+        reverse: Bool,
+        streamingMode: FDB.StreamingMode
+    ) async throws -> [FDB.KeyValue] {
+        var records: [FDB.KeyValue] = []
+        if limit > 0 {
+            records.reserveCapacity(limit)
+        }
+        for try await record in transaction.getRange(
+            from: begin,
+            to: end,
+            limit: limit,
+            reverse: reverse,
+            snapshot: false,
+            streamingMode: streamingMode
+        ) {
+            records.append(record)
+        }
+        return records
     }
 
     // Persist a batch of stack entries for binding-tester verification.
@@ -189,7 +282,7 @@ class BindingTestInterpreter {
 
         case "POP":
             assert(!stack.isEmpty)
-            _ = popStackEntry()
+            _ = try await popStackEntry()
 
         case "DUP":
             assert(!stack.isEmpty)
@@ -201,7 +294,7 @@ class BindingTestInterpreter {
 
         case "SWAP":
             assert(!stack.isEmpty)
-            let swapIdx = popStackEntry().value as! Int64
+            let swapIdx = try await popStackEntry().value as! Int64
             let lastIdx = stack.count - 1
             let targetIdx = lastIdx - Int(swapIdx)
             assert(targetIdx >= 0 && targetIdx < stack.count)
@@ -209,14 +302,14 @@ class BindingTestInterpreter {
 
         case "SUB":
             assert(stack.count >= 2)
-            let x = popStackEntry().value as! Int64
-            let y = popStackEntry().value as! Int64
+            let x = try await popStackEntry().value as! Int64
+            let y = try await popStackEntry().value as! Int64
             pushStackValue(fromInstructionAt: instructionIndex, x - y)
 
         case "CONCAT":
             assert(stack.count >= 2)
-            let str1 = popStackEntry().value
-            let str2 = popStackEntry().value
+            let str1 = try await popStackEntry().value
+            let str2 = try await popStackEntry().value
 
             if let s1 = str1 as? String, let s2 = str2 as? String {
                 pushStackValue(fromInstructionAt: instructionIndex, s1 + s2)
@@ -230,11 +323,11 @@ class BindingTestInterpreter {
             try replaceSelectedTransaction()
 
         case "USE_TRANSACTION":
-            let name = popStackEntry().value as! [UInt8]
+            let name = try await popStackEntry().value as! [UInt8]
             try selectTransaction(name)
 
         case "ON_ERROR":
-            let errorCode = popStackEntry().value as! Int64
+            let errorCode = try await popStackEntry().value as! Int64
             let transaction = try selectedTransaction()
 
             // Create FDBError from the error code
@@ -260,8 +353,8 @@ class BindingTestInterpreter {
 
         case "SET":
             assert(stack.count >= 2)
-            let key = popStackEntry().value as! [UInt8]
-            let value = popStackEntry().value as! [UInt8]
+            let key = try await popStackEntry().value as! [UInt8]
+            let value = try await popStackEntry().value as! [UInt8]
 
             try await database.withTransaction { transaction in
                 try transaction.setValue(value, for: key)
@@ -270,7 +363,7 @@ class BindingTestInterpreter {
 
         case "GET":
             assert(!stack.isEmpty)
-            let key = popStackEntry().value as! [UInt8]
+            let key = try await popStackEntry().value as! [UInt8]
 
             let result = try await database.withTransaction { transaction in
                 try await transaction.getValue(for: key, snapshot: false)
@@ -284,14 +377,14 @@ class BindingTestInterpreter {
 
         case "LOG_STACK":
             assert(!stack.isEmpty)
-            let logPrefix = popStackEntry().value as! [UInt8]
+            let logPrefix = try await popStackEntry().value as! [UInt8]
 
             // Process stack in batches of 100 like Python/Go implementations
             var entries: [(stackIndex: Int, entry: StackEntry)] = []
             var stackIndex = stack.count - 1
 
             while !stack.isEmpty {
-                let entry = popStackEntry()
+                let entry = try await popStackEntry()
                 entries.append((stackIndex: stackIndex, entry: entry))
                 stackIndex -= 1
 
@@ -308,8 +401,10 @@ class BindingTestInterpreter {
 
         case "COMMIT":
             let transaction = try selectedTransaction()
-            _ = try await transaction.commit()
-            pushStackValue(fromInstructionAt: instructionIndex, Array("COMMIT_RESULT".utf8))
+            pushStackValue(
+                fromInstructionAt: instructionIndex,
+                PendingCommitResult(transaction: transaction)
+            )
 
         case "RESET":
             if transactionsByName[selectedTransactionName] as? FDBTransaction != nil {
@@ -323,132 +418,158 @@ class BindingTestInterpreter {
 
         case "GET_KEY":
             // Python order: key, or_equal, offset, prefix = inst.pop(4)
-            let prefix = popStackEntry().value as! [UInt8]
-            let offset = Int(popStackEntry().value as! Int64)
-            let orEqual = (popStackEntry().value as! Int64) != 0
-            let key = popStackEntry().value as! [UInt8]
+            let prefix = try await popStackEntry().value as! [UInt8]
+            let offset = try integer(
+                from: try await popStackEntry().value as! Int64,
+                named: "GET_KEY offset"
+            )
+            let orEqual = (try await popStackEntry().value as! Int64) != 0
+            let key = try await popStackEntry().value as! [UInt8]
 
             let selector = FDB.KeySelector(key: key, orEqual: orEqual, offset: offset)
             let transaction = try selectedTransaction()
 
-            if let resultKey = try await transaction.getKey(selector: selector, snapshot: false) {
-                let filteredKey = constrainKeyToPrefix(resultKey, prefix: prefix)
-                pushStackValue(fromInstructionAt: instructionIndex, filteredKey)
-            } else {
-                pushStackValue(fromInstructionAt: instructionIndex, Array("RESULT_NOT_PRESENT".utf8))
-            }
+            let resultKey = try await transaction.getKey(
+                selector: selector,
+                snapshot: false
+            )
+            let filteredKey = try constrainKeyToPrefix(
+                resultKey,
+                prefix: prefix
+            )
+            pushStackValue(fromInstructionAt: instructionIndex, filteredKey)
 
         case "GET_RANGE":
             // Python/Go order: begin, end, limit, reverse, mode (but Go pops in reverse)
             // Go pops: mode, reverse, limit, endKey, beginKey
-            _ = popStackEntry().value as! Int64 // Streaming mode, ignore for now
-            _ = (popStackEntry().value as! Int64) != 0
-            let limit = Int(popStackEntry().value as! Int64)
-            let endKey = popStackEntry().value as! [UInt8]
-            let beginKey = popStackEntry().value as! [UInt8]
+            let streamingMode = try streamingMode(
+                from: try await popStackEntry().value as! Int64
+            )
+            let reverse = (try await popStackEntry().value as! Int64) != 0
+            let limit = try integer(
+                from: try await popStackEntry().value as! Int64,
+                named: "GET_RANGE limit"
+            )
+            let endKey = try await popStackEntry().value as! [UInt8]
+            let beginKey = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
 
-            let result = try await transaction.readRangeBatch(
-                from: beginKey,
-                to: endKey,
+            let records = try await readRangeRecords(
+                transaction: transaction,
+                from: .firstGreaterOrEqual(beginKey),
+                to: .firstGreaterOrEqual(endKey),
                 limit: limit,
-                snapshot: false
+                reverse: reverse,
+                streamingMode: streamingMode
             )
 
-            pushRangeRecords(instructionIndex, result.records)
+            pushRangeRecords(instructionIndex, records)
 
         case "GET_RANGE_STARTS_WITH":
             // Python order: prefix, limit, reverse, mode (pops 4 parameters)
             // Go order: same but pops in reverse
-            _ = popStackEntry().value as! Int64 // Streaming mode, ignore for now
-            _ = (popStackEntry().value as! Int64) != 0
-            let limit = Int(popStackEntry().value as! Int64)
-            let prefix = popStackEntry().value as! [UInt8]
+            let streamingMode = try streamingMode(
+                from: try await popStackEntry().value as! Int64
+            )
+            let reverse = (try await popStackEntry().value as! Int64) != 0
+            let limit = try integer(
+                from: try await popStackEntry().value as! Int64,
+                named: "GET_RANGE_STARTS_WITH limit"
+            )
+            let prefix = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
 
-            var endKey = prefix
-            endKey.append(0xFF)
-
-            let result = try await transaction.readRangeBatch(
-                from: prefix,
-                to: endKey,
+            let endKey = try FDB.strinc(prefix)
+            let records = try await readRangeRecords(
+                transaction: transaction,
+                from: .firstGreaterOrEqual(prefix),
+                to: .firstGreaterOrEqual(endKey),
                 limit: limit,
-                snapshot: false
+                reverse: reverse,
+                streamingMode: streamingMode
             )
 
-            pushRangeRecords(instructionIndex, result.records)
+            pushRangeRecords(instructionIndex, records)
 
         case "GET_RANGE_SELECTOR":
             // Python pops 10 parameters: begin_key, begin_or_equal, begin_offset, end_key, end_or_equal, end_offset, limit, reverse, mode, prefix
             // Go pops in reverse order
-            let prefix = popStackEntry().value as! [UInt8]
-            _ = popStackEntry().value as! Int64 // Streaming mode, ignore for now
-            _ = (popStackEntry().value as! Int64) != 0
-            let limit = Int(popStackEntry().value as! Int64)
-            let endOffset = Int(popStackEntry().value as! Int64)
-            let endOrEqual = (popStackEntry().value as! Int64) != 0
-            let endKey = popStackEntry().value as! [UInt8]
-            let beginOffset = Int(popStackEntry().value as! Int64)
-            let beginOrEqual = (popStackEntry().value as! Int64) != 0
-            let beginKey = popStackEntry().value as! [UInt8]
+            let prefix = try await popStackEntry().value as! [UInt8]
+            let streamingMode = try streamingMode(
+                from: try await popStackEntry().value as! Int64
+            )
+            let reverse = (try await popStackEntry().value as! Int64) != 0
+            let limit = try integer(
+                from: try await popStackEntry().value as! Int64,
+                named: "GET_RANGE_SELECTOR limit"
+            )
+            let endOffset = try integer(
+                from: try await popStackEntry().value as! Int64,
+                named: "GET_RANGE_SELECTOR end offset"
+            )
+            let endOrEqual = (try await popStackEntry().value as! Int64) != 0
+            let endKey = try await popStackEntry().value as! [UInt8]
+            let beginOffset = try integer(
+                from: try await popStackEntry().value as! Int64,
+                named: "GET_RANGE_SELECTOR begin offset"
+            )
+            let beginOrEqual = (try await popStackEntry().value as! Int64) != 0
+            let beginKey = try await popStackEntry().value as! [UInt8]
 
             let beginSelector = FDB.KeySelector(key: beginKey, orEqual: beginOrEqual, offset: beginOffset)
             let endSelector = FDB.KeySelector(key: endKey, orEqual: endOrEqual, offset: endOffset)
             let transaction = try selectedTransaction()
 
-            let result = try await transaction.readRangeBatch(
+            let records = try await readRangeRecords(
+                transaction: transaction,
                 from: beginSelector,
                 to: endSelector,
                 limit: limit,
-                targetBytes: 0,
-                streamingMode: .iterator,
-                iteration: 1,
-                reverse: false,
-                snapshot: false
+                reverse: reverse,
+                streamingMode: streamingMode
             )
 
-            pushRangeRecords(instructionIndex, result.records, prefixFilter: prefix)
+            pushRangeRecords(instructionIndex, records, prefixFilter: prefix)
 
         case "GET_ESTIMATED_RANGE_SIZE":
-            let endKey = popStackEntry().value as! [UInt8]
-            let beginKey = popStackEntry().value as! [UInt8]
+            let endKey = try await popStackEntry().value as! [UInt8]
+            let beginKey = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
 
             _ = try await transaction.getEstimatedRangeSizeBytes(beginKey: beginKey, endKey: endKey)
             pushStackValue(fromInstructionAt: instructionIndex, Array("GOT_ESTIMATED_RANGE_SIZE".utf8))
 
         case "GET_RANGE_SPLIT_POINTS":
-            let chunkSize = Int(popStackEntry().value as! Int64)
-            let endKey = popStackEntry().value as! [UInt8]
-            let beginKey = popStackEntry().value as! [UInt8]
+            let chunkSize = try await popStackEntry().value as! Int64
+            let endKey = try await popStackEntry().value as! [UInt8]
+            let beginKey = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
 
             _ = try await transaction.getRangeSplitPoints(beginKey: beginKey, endKey: endKey, chunkSize: chunkSize)
             pushStackValue(fromInstructionAt: instructionIndex, Array("GOT_RANGE_SPLIT_POINTS".utf8))
 
         case "CLEAR":
-            let key = popStackEntry().value as! [UInt8]
+            let key = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
             try transaction.clear(key: key)
 
         case "CLEAR_RANGE":
-            let beginKey = popStackEntry().value as! [UInt8]
-            let endKey = popStackEntry().value as! [UInt8]
+            let beginKey = try await popStackEntry().value as! [UInt8]
+            let endKey = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
             try transaction.clearRange(beginKey: beginKey, endKey: endKey)
 
         case "CLEAR_RANGE_STARTS_WITH":
-            let prefix = popStackEntry().value as! [UInt8]
+            let prefix = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
-            var endKey = prefix
-            endKey.append(0xFF)
+            let endKey = try FDB.strinc(prefix)
             try transaction.clearRange(beginKey: prefix, endKey: endKey)
 
         case "ATOMIC_OP":
             // Binding contract order: mutation name, key, parameter.
-            let param = popStackEntry().value as! [UInt8] // value/param
-            let key = popStackEntry().value as! [UInt8] // key
-            let mutationNameBytes = popStackEntry().value as! [UInt8]
+            let param = try await popStackEntry().value as! [UInt8] // value/param
+            let key = try await popStackEntry().value as! [UInt8] // key
+            let mutationNameBytes = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
 
             guard let mutationName = String(bytes: mutationNameBytes, encoding: .utf8) else {
@@ -509,26 +630,27 @@ class BindingTestInterpreter {
 
         case "GET_VERSIONSTAMP":
             let transaction = try selectedTransaction()
-            if let versionstamp = try await transaction.getVersionstamp() {
-                pushStackValue(fromInstructionAt: instructionIndex, versionstamp)
-            } else {
-                pushStackValue(fromInstructionAt: instructionIndex, Array("RESULT_NOT_PRESENT".utf8))
-            }
+            pushStackValue(
+                fromInstructionAt: instructionIndex,
+                PendingVersionstampResult(
+                    pendingVersionstamp: transaction.requestVersionstamp()
+                )
+            )
 
         case "READ_CONFLICT_RANGE":
-            let endKey = popStackEntry().value as! [UInt8]
-            let beginKey = popStackEntry().value as! [UInt8]
+            let endKey = try await popStackEntry().value as! [UInt8]
+            let beginKey = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
             try transaction.addConflictRange(beginKey: beginKey, endKey: endKey, type: .read)
 
         case "WRITE_CONFLICT_RANGE":
-            let endKey = popStackEntry().value as! [UInt8]
-            let beginKey = popStackEntry().value as! [UInt8]
+            let endKey = try await popStackEntry().value as! [UInt8]
+            let beginKey = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
             try transaction.addConflictRange(beginKey: beginKey, endKey: endKey, type: .write)
 
         case "READ_CONFLICT_KEY":
-            let key = popStackEntry().value as! [UInt8]
+            let key = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
             // For a single key, create a range [key, key+\x00)
             var endKey = key
@@ -536,7 +658,7 @@ class BindingTestInterpreter {
             try transaction.addConflictRange(beginKey: key, endKey: endKey, type: .read)
 
         case "WRITE_CONFLICT_KEY":
-            let key = popStackEntry().value as! [UInt8]
+            let key = try await popStackEntry().value as! [UInt8]
             let transaction = try selectedTransaction()
             // For a single key, create a range [key, key+\x00)
             var endKey = key
@@ -549,11 +671,11 @@ class BindingTestInterpreter {
             try transaction.setOption(forOption: .nextWriteNoWriteConflictRange)
 
         case "TUPLE_PACK":
-            let elementCount = popStackEntry().value as! Int64
+            let elementCount = try await popStackEntry().value as! Int64
             var elements: [any TupleElement] = []
 
             for _ in 0 ..< elementCount {
-                let item = popStackEntry().value
+                let item = try await popStackEntry().value
                 guard let element = item as? any TupleElement else {
                     throw TupleError.unsupportedType
                 }
@@ -565,12 +687,12 @@ class BindingTestInterpreter {
 
         case "TUPLE_PACK_WITH_VERSIONSTAMP":
             // Python order: prefix, count, items
-            let prefix = popStackEntry().value as! [UInt8]
-            let elementCount = popStackEntry().value as! Int64
+            let prefix = try await popStackEntry().value as! [UInt8]
+            let elementCount = try await popStackEntry().value as! Int64
             var elements: [any TupleElement] = []
 
             for _ in 0 ..< elementCount {
-                let item = popStackEntry().value
+                let item = try await popStackEntry().value
                 guard let element = item as? any TupleElement else {
                     throw TupleError.unsupportedType
                 }
@@ -589,18 +711,18 @@ class BindingTestInterpreter {
             }
 
         case "TUPLE_UNPACK":
-            let encodedTuple = popStackEntry().value as! [UInt8]
+            let encodedTuple = try await popStackEntry().value as! [UInt8]
             let elements = try Tuple.unpack(from: encodedTuple)
             for element in elements.reversed() { // Reverse to match stack order
                 pushStackValue(fromInstructionAt: instructionIndex, element.encodeTuple())
             }
 
         case "TUPLE_SORT":
-            let tupleCount = popStackEntry().value as! Int64
+            let tupleCount = try await popStackEntry().value as! Int64
             var tuples: [[UInt8]] = []
 
             for _ in 0 ..< tupleCount {
-                tuples.append(popStackEntry().value as! [UInt8])
+                tuples.append(try await popStackEntry().value as! [UInt8])
             }
 
             tuples.sort { $0.lexicographicallyPrecedes($1) }
@@ -610,11 +732,11 @@ class BindingTestInterpreter {
             }
 
         case "TUPLE_RANGE":
-            let elementCount = popStackEntry().value as! Int64
+            let elementCount = try await popStackEntry().value as! Int64
             var elements: [any TupleElement] = []
 
             for _ in 0 ..< elementCount {
-                let item = popStackEntry().value
+                let item = try await popStackEntry().value
                 guard let element = item as? any TupleElement else {
                     throw TupleError.unsupportedType
                 }
@@ -632,17 +754,17 @@ class BindingTestInterpreter {
             pushStackValue(fromInstructionAt: instructionIndex, endKey)
 
         case "ENCODE_FLOAT":
-            let floatValue = Float(popStackEntry().value as! Int64) // Convert from int representation
+            let floatValue = Float(try await popStackEntry().value as! Int64) // Convert from int representation
             let data = withUnsafeBytes(of: floatValue.bitPattern) { Array($0) }
             pushStackValue(fromInstructionAt: instructionIndex, data)
 
         case "ENCODE_DOUBLE":
-            let doubleValue = Double(popStackEntry().value as! Int64) // Convert from int representation
+            let doubleValue = Double(try await popStackEntry().value as! Int64) // Convert from int representation
             let data = withUnsafeBytes(of: doubleValue.bitPattern) { Array($0) }
             pushStackValue(fromInstructionAt: instructionIndex, data)
 
         case "DECODE_FLOAT":
-            let data = popStackEntry().value as! [UInt8]
+            let data = try await popStackEntry().value as! [UInt8]
             guard data.count == MemoryLayout<Float>.size else {
                 throw TupleError.invalidDecoding(
                     "DECODE_FLOAT requires exactly \(MemoryLayout<Float>.size) bytes"
@@ -652,7 +774,7 @@ class BindingTestInterpreter {
             pushStackValue(fromInstructionAt: instructionIndex, Int64(floatValue.bitPattern))
 
         case "DECODE_DOUBLE":
-            let data = popStackEntry().value as! [UInt8]
+            let data = try await popStackEntry().value as! [UInt8]
             guard data.count == MemoryLayout<Double>.size else {
                 throw TupleError.invalidDecoding(
                     "DECODE_DOUBLE requires exactly \(MemoryLayout<Double>.size) bytes"
@@ -662,9 +784,9 @@ class BindingTestInterpreter {
             pushStackValue(fromInstructionAt: instructionIndex, Int64(bitPattern: doubleValue.bitPattern))
 
         case "WAIT_FUTURE":
-            // In async context, futures are automatically awaited, just pass through the item
+            // Popping resolves the pending operation and preserves its source index.
             let oldIdx = stack.count > 0 ? stack.last!.instructionIndex : instructionIndex
-            let item = popStackEntry().value
+            let item = try await popStackEntry().value
             pushStackValue(fromInstructionAt: oldIdx, item)
 
         case "START_THREAD":
@@ -693,17 +815,18 @@ class BindingTestInterpreter {
         let instructions = try await database.withTransaction { transaction -> [(key: [UInt8], value: [UInt8])] in
             let prefixTuple = Tuple([programPrefix])
             let beginKey = prefixTuple.pack()
-            let endKey = beginKey + [0xFF] // Simple range end
-
-            let result = try await transaction.readRangeBatch(
-                from: beginKey,
-                to: endKey,
+            let endKey = try FDB.strinc(beginKey)
+            let records = try await self.readRangeRecords(
+                transaction: transaction,
+                from: .firstGreaterOrEqual(beginKey),
+                to: .firstGreaterOrEqual(endKey),
                 limit: 0,
-                snapshot: false
+                reverse: false,
+                streamingMode: .iterator
             )
 
-            return result.records.map {
-                (key: $0.0.copyBytes(), value: $0.1.copyBytes())
+            return records.map {
+                (key: $0.key.copyBytes(), value: $0.value.copyBytes())
             }
         }
 

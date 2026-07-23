@@ -37,9 +37,14 @@
 /// let key = try tuple.packWithVersionstamp()
 /// transaction.atomicOp(key: key, param: [], mutationType: .setVersionstampedKey)
 ///
-/// // After commit, read the completed versionstamp
-/// let committedVersion = try await transaction.getVersionstamp()
-/// let complete = Versionstamp(transactionVersion: committedVersion!, userVersion: 0)
+/// // Request before commit, then resolve the assigned version after commit.
+/// let pendingVersionstamp = transaction.requestVersionstamp()
+/// try await transaction.commit()
+/// let committedVersion = try await pendingVersionstamp.value
+/// let complete = Versionstamp(
+///     transactionVersion: committedVersion.bytes.copyBytes(),
+///     userVersion: 0
+/// )
 /// ```
 public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertible {
 

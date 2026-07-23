@@ -42,7 +42,7 @@ public protocol DatabaseProtocol: Sendable {
     /// - Returns: The result of the transaction operation.
     /// - Throws: `FDBError` if the transaction fails after all retry attempts.
     func withTransaction<T: Sendable>(
-        _ operation: (TransactionProtocol) async throws -> T
+        _ operation: (Transaction) async throws -> T
     ) async throws -> T
 }
 
@@ -95,12 +95,13 @@ public protocol TransactionProtocol: Sendable {
     /// - Parameters:
     ///   - selector: The key selector to resolve.
     ///   - snapshot: Whether to perform a snapshot read.
-    /// - Returns: The resolved key, or nil if no key matches.
+    /// - Returns: The selector's resolved key, including a boundary key when
+    ///   the selector resolves outside the stored key range.
     /// - Throws: `FDBError` if the operation fails.
     func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteString?
+    ) async throws -> FDB.ByteString
 
     /// Retrieves key-value pairs within a range using key selectors.
     ///
@@ -133,22 +134,19 @@ public protocol TransactionProtocol: Sendable {
 
     /// Commits the transaction.
     ///
-    /// - Returns: `true` if the transaction was successfully committed.
     /// - Throws: `FDBError` if the commit fails.
-    func commit() async throws -> Bool
+    func commit() async throws
 
     /// Cancels the transaction.
     ///
     /// After calling this method, the transaction cannot be used for further operations.
     func cancel()
 
-    /// Gets the versionstamp for this transaction.
+    /// Creates the pending transaction versionstamp result before commit.
     ///
-    /// The versionstamp is only available after the transaction has been committed.
-    ///
-    /// - Returns: The transaction's versionstamp as a key, or nil if not available.
-    /// - Throws: `FDBError` if the operation fails.
-    func getVersionstamp() async throws -> FDB.ByteString?
+    /// The returned value becomes ready after a successful commit. Requesting
+    /// it before committing avoids a call order that could wait forever.
+    func requestVersionstamp() -> any FDB.PendingTransactionVersionstamp
 
     /// Sets the read version for snapshot reads.
     ///
@@ -183,7 +181,7 @@ public protocol TransactionProtocol: Sendable {
     func getEstimatedRangeSizeBytes<Begin: FDB.ByteInput, End: FDB.ByteInput>(
         beginKey: Begin,
         endKey: End
-    ) async throws -> Int
+    ) async throws -> Int64
 
     /// Returns a list of keys that can split the given range into roughly equal chunks.
     ///
@@ -198,7 +196,7 @@ public protocol TransactionProtocol: Sendable {
     func getRangeSplitPoints<Begin: FDB.ByteInput, End: FDB.ByteInput>(
         beginKey: Begin,
         endKey: End,
-        chunkSize: Int
+        chunkSize: Int64
     ) async throws -> [FDB.ByteString]
 
     /// Returns the version number at which a committed transaction modified the database.
@@ -291,7 +289,7 @@ extension DatabaseProtocol {
     /// - Returns: The result of the successful transaction.
     /// - Throws: `FDBError` if all retry attempts fail.
     public func withTransaction<T: Sendable>(
-        _ operation: (TransactionProtocol) async throws -> T
+        _ operation: (Transaction) async throws -> T
     ) async throws -> T {
         let maximumAttemptCount = 100
         let transaction = try createTransaction()
@@ -300,10 +298,7 @@ extension DatabaseProtocol {
             do {
                 try Task.checkCancellation()
                 let result = try await operation(transaction)
-                let committed = try await transaction.commit()
-                guard committed else {
-                    throw FDBError(.notCommitted)
-                }
+                try await transaction.commit()
                 return result
             } catch is CancellationError {
                 transaction.cancel()
@@ -342,14 +337,14 @@ extension TransactionProtocol {
     public func getKey(
         selector: FDB.Selectable,
         snapshot: Bool = false
-    ) async throws -> FDB.ByteString? {
+    ) async throws -> FDB.ByteString {
         try await getKey(selector: selector.toKeySelector(), snapshot: snapshot)
     }
 
     public func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool = false
-    ) async throws -> FDB.ByteString? {
+    ) async throws -> FDB.ByteString {
         try await getKey(selector: selector, snapshot: snapshot)
     }
 
@@ -437,7 +432,8 @@ extension TransactionProtocol {
     }
 
     public func setOption(to value: Int, forOption option: FDB.TransactionOption) throws {
-        let valueBytes = withUnsafeBytes(of: Int64(value)) { [UInt8]($0) }
+        var encodedValue = Int64(value).littleEndian
+        let valueBytes = withUnsafeBytes(of: &encodedValue) { [UInt8]($0) }
         try setOption(to: valueBytes, forOption: option)
     }
 }

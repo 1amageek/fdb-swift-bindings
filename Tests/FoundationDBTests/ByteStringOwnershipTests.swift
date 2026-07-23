@@ -57,6 +57,21 @@ struct ByteStringOwnershipTests {
         #expect(selector.key.copyBytes() == [0x01, 0x02])
     }
 
+    @Test("Key selectors retain immutable owner-backed input without copying")
+    func keySelectorRetainsOwnerBackedInput() throws {
+        let key = FDB.ByteString([0x10, 0x20, 0x30])
+        let sourceAddress = try key.withUnsafeBytes {
+            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        }
+
+        let selector = FDB.KeySelector.firstGreaterOrEqual(key)
+        let selectorAddress = try selector.key.withUnsafeBytes {
+            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        }
+
+        #expect(selectorAddress == sourceAddress)
+    }
+
     @Test("Empty input remains a valid FoundationDB argument")
     func emptyInputIsAValidFoundationDBArgument() throws {
         let address = try withInputBytes([UInt8]()) { bytes, length in

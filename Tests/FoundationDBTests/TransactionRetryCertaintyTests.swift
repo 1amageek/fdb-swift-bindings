@@ -182,8 +182,8 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
     func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteString? {
-        nil
+    ) async throws -> FDB.ByteString {
+        []
     }
 
     func readRangeBatch(
@@ -199,7 +199,7 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
         fatalError("Native range reads are outside this retry test")
     }
 
-    func commit() async throws -> Bool {
+    func commit() async throws {
         let errorCode = state.withLock { state -> Int32? in
             state.commitCount += 1
             guard !state.remainingCommitErrors.isEmpty else {
@@ -210,15 +210,14 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
         if let errorCode {
             throw FDBError(code: errorCode)
         }
-        return true
     }
 
     func cancel() {
         state.withLock { $0.cancelCount += 1 }
     }
 
-    func getVersionstamp() async throws -> FDB.ByteString? {
-        nil
+    func requestVersionstamp() -> any FDB.PendingTransactionVersionstamp {
+        UnavailableTransactionVersionstamp()
     }
 
     func setReadVersion(_ version: FDB.Version) {}
@@ -237,7 +236,7 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
     >(
         beginKey: Begin,
         endKey: End
-    ) async throws -> Int {
+    ) async throws -> Int64 {
         0
     }
 
@@ -247,7 +246,7 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
     >(
         beginKey: Begin,
         endKey: End,
-        chunkSize: Int
+        chunkSize: Int64
     ) async throws -> [FDB.ByteString] {
         []
     }
@@ -291,4 +290,13 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
         to value: Int,
         forOption option: FDB.TransactionOption
     ) throws {}
+}
+
+private struct UnavailableTransactionVersionstamp:
+        FDB.PendingTransactionVersionstamp {
+    var value: FDB.TransactionVersionstamp {
+        get async throws {
+            throw FDBError(.invalidAPICall)
+        }
+    }
 }

@@ -27,6 +27,25 @@ struct VersionstampTests {
 
     // MARK: - Basic Versionstamp Tests
 
+    @Test("Transaction versionstamp requires exactly ten bytes")
+    func transactionVersionstampValidatesByteCount() throws {
+        let validBytes = FDB.ByteString(
+            [UInt8](repeating: 0x01, count: FDB.TransactionVersionstamp.byteCount)
+        )
+        let versionstamp = try FDB.TransactionVersionstamp(bytes: validBytes)
+        #expect(versionstamp.bytes == validBytes)
+
+        #expect(throws: FDB.ResultError.unexpectedByteCount(
+            result: "transaction versionstamp",
+            expected: 10,
+            actual: 9
+        )) {
+            try FDB.TransactionVersionstamp(
+                bytes: FDB.ByteString([UInt8](repeating: 0x01, count: 9))
+            )
+        }
+    }
+
     @Test("Versionstamp incomplete creation")
     func testIncompleteCreation() {
         let vs = Versionstamp.incomplete(userVersion: 0)
@@ -391,36 +410,4 @@ struct VersionstampTests {
         #expect((decoded[1] as? String) == "middle")
         #expect((decoded[2] as? Versionstamp) == vs2)
     }
-
-    // MARK: - Integration Test Structure
-    // Note: These tests require a running FDB cluster
-    // Uncomment and adapt when ready for integration testing
-
-    /*
-    @Test("Integration: Write and read versionstamped key")
-    func testIntegrationWriteReadVersionstampedKey() async throws {
-        try await FDBClient.initialize()
-        let database = try FDBClient.openTestDatabase()
-
-        let result = try await database.withTransaction { transaction in
-            let vs = Versionstamp.incomplete(userVersion: 0)
-            let tuple = Tuple("test_prefix", vs)
-            let key = try tuple.packWithVersionstamp()
-
-            // Write versionstamped key
-            try transaction.atomicOp(
-                key: key,
-                param: [],
-                mutationType: .setVersionstampedKey
-            )
-
-            // Get committed versionstamp
-            return try await transaction.getVersionstamp()
-        }
-
-        // Verify versionstamp was returned
-        #expect(result != nil)
-        #expect(result!.count == 10)
-    }
-    */
 }

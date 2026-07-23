@@ -151,7 +151,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
     public func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteString? {
+    ) async throws -> FDB.ByteString {
         let offset = try validatedParameter(
             selector.offset,
             named: "selector.offset"
@@ -173,21 +173,22 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
         return try await future.value
     }
 
-    public func commit() async throws -> Bool {
+    public func commit() async throws {
         _ = try await Future<CompletionResultDecoder>(
             fdb_transaction_commit(transaction)
         ).value
-        return true
     }
 
     public func cancel() {
         fdb_transaction_cancel(transaction)
     }
 
-    public func getVersionstamp() async throws -> FDB.ByteString? {
-        try await Future<KeyResultDecoder>(
-            fdb_transaction_get_versionstamp(transaction)
-        ).value
+    public func requestVersionstamp() -> any FDB.PendingTransactionVersionstamp {
+        TransactionVersionstampRequest(
+            future: Future<TransactionVersionstampResultDecoder>(
+                fdb_transaction_get_versionstamp(transaction)
+            )
+        )
     }
 
     public func setReadVersion(_ version: FDB.Version) {
@@ -209,7 +210,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
     public func getEstimatedRangeSizeBytes<
         Begin: FDB.ByteInput,
         End: FDB.ByteInput
-    >(beginKey: Begin, endKey: End) async throws -> Int {
+    >(beginKey: Begin, endKey: End) async throws -> Int64 {
         let future = try withInputBytes(
             beginKey
         ) { beginKeyBytes, beginKeyLength in
@@ -225,7 +226,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
                 )
             }
         }
-        return try Int(await future.value)
+        return try await future.value
     }
 
     public func getRangeSplitPoints<
@@ -234,7 +235,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
     >(
         beginKey: Begin,
         endKey: End,
-        chunkSize: Int
+        chunkSize: Int64
     ) async throws -> [FDB.ByteString] {
         let future = try withInputBytes(
             beginKey
@@ -247,7 +248,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
                         beginKeyLength,
                         endKeyBytes,
                         endKeyLength,
-                        Int64(chunkSize)
+                        chunkSize
                     )
                 )
             }

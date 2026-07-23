@@ -340,6 +340,20 @@ struct KeyResultDecoder: ResultDecoder {
     }
 }
 
+/// Decodes the 10-byte version assigned to a committed transaction.
+struct TransactionVersionstampResultDecoder: ResultDecoder {
+    static func decode(
+        from future: FutureHandle,
+        retaining owner: FutureOwner
+    ) throws -> FDB.TransactionVersionstamp {
+        let bytes = try KeyResultDecoder.decode(
+            from: future,
+            retaining: owner
+        )
+        return try FDB.TransactionVersionstamp(bytes: bytes)
+    }
+}
+
 /// A result type for futures that return value data.
 ///
 /// Used for get operations that retrieve values associated with keys.
@@ -389,7 +403,7 @@ public struct RangeBatch: Sendable {
     /// Records decoded from a FoundationDB future are zero-copy views. Keeping
     /// any record alive retains the complete FoundationDB range result. Long-lived
     /// consumers should call `copyBytes()` at their explicit ownership boundary.
-    public let records: FDB.KeyValueArray
+    public let records: [FDB.KeyValue]
 
     /// Indicates whether there are more records beyond this result.
     public let hasMore: Bool
@@ -398,7 +412,7 @@ public struct RangeBatch: Sendable {
     ///
     /// This initializer is useful for transaction implementations that already
     /// own their key/value records and therefore do not decode an FDB future.
-    public init(records: FDB.KeyValueArray, hasMore: Bool) {
+    public init(records: [FDB.KeyValue], hasMore: Bool) {
         self.records = records
         self.hasMore = hasMore
     }
@@ -439,7 +453,7 @@ struct RangeBatchResultDecoder: ResultDecoder {
             throw FDBError(.invalidAPICall)
         }
 
-        var keyValueArray: FDB.KeyValueArray = []
+        var keyValueArray: [FDB.KeyValue] = []
         keyValueArray.reserveCapacity(Int(recordCount))
         for index in 0 ..< Int(recordCount) {
             let sourceRecord = sourceRecords[index]
@@ -453,7 +467,7 @@ struct RangeBatchResultDecoder: ResultDecoder {
                 length: sourceRecord.value_length,
                 owner: owner
             )
-            keyValueArray.append((key, value))
+            keyValueArray.append(FDB.KeyValue(key: key, value: value))
         }
 
         return RangeBatch(records: keyValueArray, hasMore: hasMore != 0)

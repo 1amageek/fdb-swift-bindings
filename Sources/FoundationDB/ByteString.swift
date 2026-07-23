@@ -4,6 +4,15 @@
 /// future that owns their memory, so slicing does not copy payload bytes. Call
 /// `copyBytes()` only at an explicit ownership boundary.
 extension FDB {
+/// An owner of immutable, stable bytes retained by `ByteString`.
+///
+/// Every borrow must expose the same bytes, count, and base address for the
+/// owner's lifetime.
+public protocol ByteStringOwner: ByteInput {
+    /// The exact number of bytes exposed by every borrow.
+    var count: Int { get }
+}
+
 public struct ByteString:
         ByteInput,
         Sendable,
@@ -17,6 +26,17 @@ public struct ByteString:
 
     private let owner: any ByteStringOwner
     private let byteRange: Range<Int>
+
+    /// Retains an immutable byte owner without copying its payload.
+    ///
+    /// The owner must expose the same immutable bytes, count, and base address
+    /// for its complete lifetime. A nonempty borrow must have a valid base
+    /// address. The owner remains retained by this value and all of its slices.
+    public init<Owner: ByteStringOwner>(retaining owner: Owner) {
+        precondition(owner.count >= 0)
+        self.owner = owner
+        self.byteRange = 0..<owner.count
+    }
 
     public init(_ bytes: FDB.Bytes) {
         let owner = ArrayByteStringOwner(bytes)
@@ -90,7 +110,7 @@ public struct ByteString:
         _ body: (UnsafeRawBufferPointer) throws -> Result
     ) rethrows -> Result {
         var outcome: ByteAccessOutcome<Result> = .missing
-        try owner.withBytes { bytes in
+        try owner.withUnsafeBytes { bytes in
             guard case .missing = outcome else {
                 preconditionFailure("Byte string owner invoked its callback more than once")
             }
@@ -151,15 +171,7 @@ public struct ByteString:
 }
 }
 
-private protocol ByteStringOwner: Sendable {
-    var count: Int { get }
-
-    func withBytes(
-        _ body: (UnsafeRawBufferPointer) throws -> Void
-    ) rethrows
-}
-
-private struct ArrayByteStringOwner: ByteStringOwner {
+private struct ArrayByteStringOwner: FDB.ByteStringOwner {
     let bytes: FDB.Bytes
 
     init(_ bytes: FDB.Bytes) {
@@ -168,14 +180,14 @@ private struct ArrayByteStringOwner: ByteStringOwner {
 
     var count: Int { bytes.count }
 
-    func withBytes(
-        _ body: (UnsafeRawBufferPointer) throws -> Void
-    ) rethrows {
+    func withUnsafeBytes<Result>(
+        _ body: (UnsafeRawBufferPointer) throws -> Result
+    ) rethrows -> Result {
         try bytes.withUnsafeBytes(body)
     }
 }
 
-private struct RetainedByteStringOwner<Owner: Sendable>: ByteStringOwner {
+private struct RetainedByteStringOwner<Owner: Sendable>: FDB.ByteStringOwner {
     let byteAddress: UInt
     let count: Int
     let owner: Owner
@@ -192,9 +204,9 @@ private struct RetainedByteStringOwner<Owner: Sendable>: ByteStringOwner {
         self.owner = owner
     }
 
-    func withBytes(
-        _ body: (UnsafeRawBufferPointer) throws -> Void
-    ) rethrows {
+    func withUnsafeBytes<Result>(
+        _ body: (UnsafeRawBufferPointer) throws -> Result
+    ) rethrows -> Result {
         try withExtendedLifetime(owner) {
             if count == 0 {
                 return try body(UnsafeRawBufferPointer(start: nil, count: 0))
@@ -202,7 +214,7 @@ private struct RetainedByteStringOwner<Owner: Sendable>: ByteStringOwner {
             guard let bytes = UnsafeRawPointer(bitPattern: byteAddress) else {
                 preconditionFailure("Retained byte string address is invalid")
             }
-            try body(UnsafeRawBufferPointer(start: bytes, count: count))
+            return try body(UnsafeRawBufferPointer(start: bytes, count: count))
         }
     }
 }

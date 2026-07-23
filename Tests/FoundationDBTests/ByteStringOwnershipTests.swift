@@ -72,6 +72,32 @@ struct ByteStringOwnershipTests {
         #expect(selectorAddress == sourceAddress)
     }
 
+    @Test("External immutable owners are retained without copying")
+    func externalImmutableOwnerIsRetainedWithoutCopying() throws {
+        let releaseRecorder = ByteInputReleaseRecorder()
+        var owner: BorrowTrackingByteStringOwner? = BorrowTrackingByteStringOwner(
+            bytes: [0x10, 0x20, 0x30],
+            releaseRecorder: releaseRecorder
+        )
+        let sourceAddress = try #require(owner).withUnsafeBytes {
+            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        }
+        var bytes: FDB.ByteString? = FDB.ByteString(
+            retaining: try #require(owner)
+        )
+
+        let retainedAddress = try #require(bytes).withUnsafeBytes {
+            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        }
+        #expect(retainedAddress == sourceAddress)
+        #expect(owner?.borrowCount == 2)
+
+        owner = nil
+        #expect(!releaseRecorder.wasReleased)
+        bytes = nil
+        #expect(releaseRecorder.wasReleased)
+    }
+
     @Test("Empty input remains a valid FoundationDB argument")
     func emptyInputIsAValidFoundationDBArgument() throws {
         let address = try withInputBytes([UInt8]()) { bytes, length in
@@ -119,6 +145,39 @@ private final class BorrowTrackingByteInput: FDB.ByteInput, Sendable {
 
     init(bytes: [UInt8], releaseRecorder: ByteInputReleaseRecorder) {
         self.bytes = bytes
+        self.releaseRecorder = releaseRecorder
+    }
+
+    deinit {
+        releaseRecorder.recordRelease()
+    }
+
+    var borrowCount: Int { state.withLock { $0.borrowCount } }
+
+    func withUnsafeBytes<Result>(
+        _ body: (UnsafeRawBufferPointer) throws -> Result
+    ) rethrows -> Result {
+        state.withLock { $0.borrowCount += 1 }
+        return try bytes.withUnsafeBytes(body)
+    }
+}
+
+private final class BorrowTrackingByteStringOwner:
+        FDB.ByteStringOwner,
+        Sendable {
+    private struct State: Sendable {
+        var borrowCount = 0
+    }
+
+    let count: Int
+
+    private let bytes: [UInt8]
+    private let state = Mutex(State())
+    private let releaseRecorder: ByteInputReleaseRecorder
+
+    init(bytes: [UInt8], releaseRecorder: ByteInputReleaseRecorder) {
+        self.bytes = bytes
+        self.count = bytes.count
         self.releaseRecorder = releaseRecorder
     }
 

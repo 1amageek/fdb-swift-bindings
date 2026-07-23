@@ -33,7 +33,6 @@ import CFoundationDB
 /// // Open a database connection
 /// let database = try FDBClient.openDatabase()
 /// ```
-// TODO: Remove hard-coded error codes.
 public final class FDBClient: Sendable {
     /// FoundationDB API version constants.
     public static let defaultApiVersion: Int = 710

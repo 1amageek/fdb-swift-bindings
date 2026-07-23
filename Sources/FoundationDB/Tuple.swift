@@ -51,7 +51,6 @@ public protocol TupleElement: Sendable, Hashable, Equatable {
     static func decodeTuple(from bytes: FDB.Bytes, at offset: inout Int) throws -> Self
 }
 
-// TODO: Make it a TypedTuple so that we don't have to typecast manually.
 /// A tuple represents an ordered collection of elements that can be encoded to and decoded from bytes.
 ///
 /// Tuples can be used as keys in FoundationDB, and their encoding preserves lexicographic ordering.

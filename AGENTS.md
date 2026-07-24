@@ -14,12 +14,16 @@
 - Keep externally fixed C symbol spellings at the import or attribute boundary only. Name Swift callbacks for the future event or state transition they deliver.
 - A `FoundationDB` prefix is justified only when disambiguation is required by the public domain model, not because a C type had that prefix.
 - Names such as `regular`, `legacy`, `impl`, `helper`, `manager`, or a bare `callback` are invalid.
-- `ByteInput` denotes a synchronous borrowed input; `ByteString` denotes immutable retained bytes. Keep this ownership distinction explicit in new APIs.
+- A synchronous borrowed input and the immutable retained `ByteString` from
+  `DatabaseTypes` have distinct ownership contracts. Name the borrowed input
+  for that contract and do not introduce a second retained byte type.
 
 ## Ownership, Retry, and Error Contracts
 
 - Derive byte count and pointer within the same `withUnsafeBytes` borrow. Never perform a separate count read that creates a TOCTOU window.
-- FoundationDB future results retain the future owner and expose bounded ByteString views without copying. A pointer must not escape its owner's lifetime.
+- FoundationDB future results retain the future owner and expose bounded
+  `ByteString` views without copying. A pointer must not escape its owner's
+  lifetime.
 - Snapshot mutable or arbitrary external ByteInput when immutable retained storage is required for hashing, selectors, or later use.
 - Use FoundationDB's official error predicates for retry classification. Preserve the distinction between retryable-not-committed and maybe-committed outcomes.
 - Complete every future continuation exactly once and propagate cancellation and typed FoundationDB errors without default success values.

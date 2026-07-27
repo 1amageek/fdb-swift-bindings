@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 import CFoundationDB
+import DatabaseTypes
 import Synchronization
 
 /// Opaque handle for one FoundationDB future.
@@ -221,25 +222,25 @@ private func futureResultBytes(
     _ sourceBytes: UnsafePointer<UInt8>?,
     length: Int32,
     owner: FutureOwner
-) throws -> FDB.ByteString {
+) throws -> ByteString {
     guard length >= 0 else {
         throw FDBError(.invalidAPICall)
     }
     guard length > 0 else {
-        return FDB.ByteString(
-            sharing: nil,
+        return ByteString(retaining: FutureResultByteOwner(
+            sourceBytes: nil,
             count: 0,
-            retaining: owner
-        )
+            future: owner
+        ))
     }
     guard sourceBytes != nil else {
         throw FDBError(.invalidAPICall)
     }
-    return FDB.ByteString(
-        sharing: sourceBytes,
+    return ByteString(retaining: FutureResultByteOwner(
+        sourceBytes: sourceBytes,
         count: Int(length),
-        retaining: owner
-    )
+        future: owner
+    ))
 }
 
 /// A result type for futures that return no data (void operations).
@@ -323,7 +324,7 @@ struct KeyResultDecoder: ResultDecoder {
     static func decode(
         from future: FutureHandle,
         retaining owner: FutureOwner
-    ) throws -> FDB.ByteString {
+    ) throws -> ByteString {
         var keyStorage: UnsafePointer<UInt8>?
         var keyLength: Int32 = 0
 
@@ -366,7 +367,7 @@ struct ValueResultDecoder: ResultDecoder {
     static func decode(
         from future: FutureHandle,
         retaining owner: FutureOwner
-    ) throws -> FDB.ByteString? {
+    ) throws -> ByteString? {
         var present: Int32 = 0
         var valueStorage: UnsafePointer<UInt8>?
         var valueLength: Int32 = 0
@@ -486,7 +487,7 @@ struct KeyCollectionResultDecoder: ResultDecoder {
     static func decode(
         from future: FutureHandle,
         retaining owner: FutureOwner
-    ) throws -> [FDB.ByteString] {
+    ) throws -> [ByteString] {
         var sourceKeys: UnsafePointer<FDBKey>?
         var keyCount: Int32 = 0
 
@@ -505,7 +506,7 @@ struct KeyCollectionResultDecoder: ResultDecoder {
             throw FDBError(.invalidAPICall)
         }
 
-        var keyArray: [FDB.ByteString] = []
+        var keyArray: [ByteString] = []
         keyArray.reserveCapacity(Int(keyCount))
         for index in 0 ..< Int(keyCount) {
             let sourceKey = sourceKeys[index]

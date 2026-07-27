@@ -1,3 +1,5 @@
+import DatabaseTypes
+
 /// Bytes borrowed synchronously for one FoundationDB input operation.
 ///
 /// The pointer passed to `body` is valid only for the duration of that call.
@@ -14,6 +16,8 @@ extension FDB {
 }
 
 extension Array: FDB.ByteInput where Element == UInt8 {}
+
+extension ByteString: FDB.ByteInput {}
 
 extension String: FDB.ByteInput {
     public func withUnsafeBytes<Result>(
@@ -68,4 +72,21 @@ func validatedParameter(_ value: Int, named parameter: String) throws -> Int32 {
         )
     }
     return result
+}
+
+/// Creates immutable retained storage for an input that may expose mutable or
+/// ephemeral bytes. The payload is copied exactly once into its final owner.
+@inline(__always)
+func retainedBytes<Source: FDB.ByteInput>(
+    copying source: Source
+) -> ByteString {
+    source.withUnsafeBytes { sourceBytes in
+        precondition(
+            sourceBytes.isEmpty || sourceBytes.baseAddress != nil,
+            "Byte input returned no address for nonempty bytes"
+        )
+        return ByteString.copying(count: sourceBytes.count) { destination in
+            destination.copyMemory(from: sourceBytes)
+        }
+    }
 }

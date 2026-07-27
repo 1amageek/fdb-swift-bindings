@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-// swift-tools-version: 6.0
+// swift-tools-version: 6.4
 import PackageDescription
 
 let package = Package(
@@ -28,6 +28,12 @@ let package = Package(
     ],
     products: [
         .library(name: "FoundationDB", targets: ["FoundationDB"]),
+    ],
+    dependencies: [
+        .package(
+            url: "https://github.com/1amageek/database-types.git",
+            exact: "26.0726.0"
+        ),
     ],
     targets: [
         .systemLibrary(
@@ -40,11 +46,24 @@ let package = Package(
         ),
         .target(
             name: "FoundationDB",
-            dependencies: ["CFoundationDB"]
+            dependencies: [
+                "CFoundationDB",
+                .product(
+                    name: "DatabaseTypes",
+                    package: "database-types"
+                ),
+            ]
         ),
         .testTarget(
             name: "FoundationDBTests",
-            dependencies: ["FoundationDB", "CFoundationDB"],
+            dependencies: [
+                "FoundationDB",
+                "CFoundationDB",
+                .product(
+                    name: "DatabaseTypes",
+                    package: "database-types"
+                ),
+            ],
             linkerSettings: [
                 .unsafeFlags(["-L/usr/local/lib"]),
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "/usr/local/lib"])
@@ -52,8 +71,15 @@ let package = Package(
         ),
         .executableTarget(
             name: "StackTester",
-            dependencies: ["FoundationDB"],
+            dependencies: [
+                "FoundationDB",
+                .product(
+                    name: "DatabaseTypes",
+                    package: "database-types"
+                ),
+            ],
             path: "Tests/StackTester/Sources/StackTester"
         ),
-    ]
+    ],
+    swiftLanguageModes: [.v6]
 )

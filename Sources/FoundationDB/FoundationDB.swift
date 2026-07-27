@@ -17,6 +17,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import DatabaseTypes
 
 /// Protocol defining the interface for FoundationDB database connections.
 ///
@@ -63,7 +64,7 @@ public protocol TransactionProtocol: Sendable {
     func getValue<Key: FDB.ByteInput>(
         for key: Key,
         snapshot: Bool
-    ) async throws -> FDB.ByteString?
+    ) async throws -> ByteString?
 
     /// Sets a value for the given key.
     ///
@@ -101,7 +102,7 @@ public protocol TransactionProtocol: Sendable {
     func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteString
+    ) async throws -> ByteString
 
     /// Retrieves key-value pairs within a range using key selectors.
     ///
@@ -197,7 +198,7 @@ public protocol TransactionProtocol: Sendable {
         beginKey: Begin,
         endKey: End,
         chunkSize: Int64
-    ) async throws -> [FDB.ByteString]
+    ) async throws -> [ByteString]
 
     /// Returns the version number at which a committed transaction modified the database.
     ///
@@ -330,21 +331,21 @@ extension TransactionProtocol {
     public func getValue<Key: FDB.ByteInput>(
         for key: Key,
         snapshot: Bool = false
-    ) async throws -> FDB.ByteString? {
+    ) async throws -> ByteString? {
         try await getValue(for: key, snapshot: snapshot)
     }
 
     public func getKey(
         selector: FDB.Selectable,
         snapshot: Bool = false
-    ) async throws -> FDB.ByteString {
+    ) async throws -> ByteString {
         try await getKey(selector: selector.toKeySelector(), snapshot: snapshot)
     }
 
     public func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool = false
-    ) async throws -> FDB.ByteString {
+    ) async throws -> ByteString {
         try await getKey(selector: selector, snapshot: snapshot)
     }
 

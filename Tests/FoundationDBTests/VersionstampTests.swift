@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 
+import DatabaseTypes
 import Foundation
 import Testing
 @testable import FoundationDB
@@ -29,7 +30,7 @@ struct VersionstampTests {
 
     @Test("Transaction versionstamp requires exactly ten bytes")
     func transactionVersionstampValidatesByteCount() throws {
-        let validBytes = FDB.ByteString(
+        let validBytes = ByteString(
             [UInt8](repeating: 0x01, count: FDB.TransactionVersionstamp.byteCount)
         )
         let versionstamp = try FDB.TransactionVersionstamp(bytes: validBytes)
@@ -41,7 +42,7 @@ struct VersionstampTests {
             actual: 9
         )) {
             try FDB.TransactionVersionstamp(
-                bytes: FDB.ByteString([UInt8](repeating: 0x01, count: 9))
+                bytes: ByteString([UInt8](repeating: 0x01, count: 9))
             )
         }
     }

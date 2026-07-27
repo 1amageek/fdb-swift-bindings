@@ -1,3 +1,5 @@
+import DatabaseTypes
+
 extension FDB {
     /// One owner-backed row returned by a FoundationDB range read.
     ///

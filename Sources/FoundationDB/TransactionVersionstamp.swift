@@ -1,3 +1,5 @@
+import DatabaseTypes
+
 extension FDB {
     /// The 10-byte version assigned to a committed transaction.
     ///

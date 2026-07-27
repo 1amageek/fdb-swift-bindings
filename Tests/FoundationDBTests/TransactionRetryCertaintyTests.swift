@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Synchronization
 import Testing
 
@@ -163,7 +164,7 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
     func getValue<Key: FDB.ByteInput>(
         for key: Key,
         snapshot: Bool
-    ) async throws -> FDB.ByteString? {
+    ) async throws -> ByteString? {
         nil
     }
 
@@ -182,7 +183,7 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
     func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteString {
+    ) async throws -> ByteString {
         []
     }
 
@@ -247,7 +248,7 @@ private final class RetryCertaintyTransaction: TransactionProtocol, Sendable {
         beginKey: Begin,
         endKey: End,
         chunkSize: Int64
-    ) async throws -> [FDB.ByteString] {
+    ) async throws -> [ByteString] {
         []
     }
 

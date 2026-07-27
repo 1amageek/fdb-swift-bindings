@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 import CFoundationDB
+import DatabaseTypes
 
 /// Core FoundationDB type definitions and utilities.
 ///
@@ -70,7 +71,7 @@ public enum FDB {
         ///   - orEqual: Whether to include the reference key itself.
         ///   - offset: Offset from the selected position.
         public init<Key: ByteInput>(key: Key, orEqual: Bool, offset: Int) {
-            self.key = ByteString(copying: key)
+            self.key = retainedBytes(copying: key)
             self.orEqual = orEqual
             self.offset = offset
         }

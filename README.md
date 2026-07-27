@@ -1,6 +1,18 @@
 # FoundationDB Swift Bindings
 
-Swift bindings for FoundationDB, providing a native Swift API for interacting with FoundationDB clusters.
+Swift 6.4 bindings for FoundationDB with explicit lifetime, retry, and result-presence semantics.
+
+## Byte ownership
+
+The bindings use `DatabaseTypes.ByteString` as their immutable retained byte
+value. FoundationDB future results retain the future that owns the native
+result storage, so point reads, keys, values, and range rows are exposed without
+copying their payload bytes.
+
+`FDB.ByteInput` is a separate synchronous borrowing contract for request input.
+`ByteString`, `[UInt8]`, and `String` can be passed directly. A key selector
+retains an existing `ByteString` without copying; arbitrary mutable input is
+copied once because the selector must store an immutable value.
 
 ## Quick Start
 
@@ -8,6 +20,7 @@ Swift bindings for FoundationDB, providing a native Swift API for interacting wi
 
 ```swift
 import FoundationDB
+import DatabaseTypes
 
 // Initialize FoundationDB
 try await FDBClient.initialize()
@@ -43,9 +56,9 @@ let sequence = transaction.getRange(
     to: .firstGreaterOrEqual([UInt8]("user;".utf8))
 )
 
-for try await (key, value) in sequence {
-    let userId = String(decoding: key, as: UTF8.self)
-    let userData = String(decoding: value, as: UTF8.self)
+for try await row in sequence {
+    let userId = String(decoding: row.key, as: UTF8.self)
+    let userData = String(decoding: row.value, as: UTF8.self)
     // Process each key-value pair as it streams
 }
 ```
@@ -86,9 +99,9 @@ This is safe — FoundationDB is transactional and the server handles client dis
 
 ## Requirements
 
-- Swift 6.1+
+- Swift 6.4+
 - FoundationDB 7.1+
-- macOS 12+ / Linux
+- macOS 15+ / Linux
 
 ## Installation
 
@@ -96,7 +109,10 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/apple/fdb-swift-bindings", from: "1.0.0")
+    .package(
+        url: "https://github.com/1amageek/fdb-swift-bindings.git",
+        from: "0.2.0"
+    )
 ]
 ```
 

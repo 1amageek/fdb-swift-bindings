@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Synchronization
 import Testing
 
@@ -12,7 +13,7 @@ struct ByteStringOwnershipTests {
             bytes: [0x10, 0x20, 0x30, 0x40, 0x50],
             releaseRecorder: releaseRecorder
         )
-        var bytes: FDB.ByteString? = FDB.ByteString(
+        var bytes: ByteString? = retainedBytes(
             copying: try #require(source)
         )
 
@@ -23,7 +24,7 @@ struct ByteStringOwnershipTests {
         let rootAddress = try #require(bytes).withUnsafeBytes {
             try #require($0.baseAddress.map(UInt.init(bitPattern:)))
         }
-        var slice: FDB.ByteString? = try #require(bytes)[2..<5]
+        var slice: ByteString? = try #require(bytes)[2..<5]
         let sliceAddress = try #require(slice).withUnsafeBytes {
             try #require($0.baseAddress.map(UInt.init(bitPattern:)))
         }
@@ -38,8 +39,8 @@ struct ByteStringOwnershipTests {
     @Test("Mutable input cannot change a retained byte string or its hash")
     func mutableInputCannotChangeRetainedValue() {
         let source = MutableByteInput(bytes: [0x10, 0x20, 0x30])
-        let bytes = FDB.ByteString(copying: source)
-        let values: Set<FDB.ByteString> = [bytes]
+        let bytes = retainedBytes(copying: source)
+        let values: Set<ByteString> = [bytes]
 
         source.replace(with: [0x90])
 
@@ -59,7 +60,7 @@ struct ByteStringOwnershipTests {
 
     @Test("Key selectors retain immutable owner-backed input without copying")
     func keySelectorRetainsOwnerBackedInput() throws {
-        let key = FDB.ByteString([0x10, 0x20, 0x30])
+        let key = ByteString([0x10, 0x20, 0x30])
         let sourceAddress = try key.withUnsafeBytes {
             try #require($0.baseAddress.map(UInt.init(bitPattern:)))
         }
@@ -79,17 +80,19 @@ struct ByteStringOwnershipTests {
             bytes: [0x10, 0x20, 0x30],
             releaseRecorder: releaseRecorder
         )
-        let sourceAddress = try #require(owner).withUnsafeBytes {
-            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        var sourceAddress: UInt?
+        try #require(owner).borrowBytes {
+            sourceAddress = $0.baseAddress.map(UInt.init(bitPattern:))
         }
-        var bytes: FDB.ByteString? = FDB.ByteString(
+        let expectedSourceAddress = try #require(sourceAddress)
+        var bytes: ByteString? = ByteString(
             retaining: try #require(owner)
         )
 
         let retainedAddress = try #require(bytes).withUnsafeBytes {
             try #require($0.baseAddress.map(UInt.init(bitPattern:)))
         }
-        #expect(retainedAddress == sourceAddress)
+        #expect(retainedAddress == expectedSourceAddress)
         #expect(owner?.borrowCount == 2)
 
         owner = nil
@@ -163,7 +166,7 @@ private final class BorrowTrackingByteInput: FDB.ByteInput, Sendable {
 }
 
 private final class BorrowTrackingByteStringOwner:
-        FDB.ByteStringOwner,
+        ByteStringOwner,
         Sendable {
     private struct State: Sendable {
         var borrowCount = 0
@@ -187,11 +190,11 @@ private final class BorrowTrackingByteStringOwner:
 
     var borrowCount: Int { state.withLock { $0.borrowCount } }
 
-    func withUnsafeBytes<Result>(
-        _ body: (UnsafeRawBufferPointer) throws -> Result
-    ) rethrows -> Result {
+    func borrowBytes(
+        _ body: (UnsafeRawBufferPointer) throws -> Void
+    ) rethrows {
         state.withLock { $0.borrowCount += 1 }
-        return try bytes.withUnsafeBytes(body)
+        try bytes.withUnsafeBytes(body)
     }
 }
 

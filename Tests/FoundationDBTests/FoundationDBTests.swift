@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 
+import DatabaseTypes
 import Testing
 
 @testable import FoundationDB
@@ -587,10 +588,10 @@ func getRangeBytes() async throws {
 
     // Sort results by key for predictable testing
     let sortedResults = result.records.sorted { $0.key.lexicographicallyPrecedes($1.key) }
-    #expect(sortedResults[0].key == key1, "First key should match key1")
-    #expect(sortedResults[0].value == value1, "First value should match value1")
-    #expect(sortedResults[1].key == key2, "Second key should match key2")
-    #expect(sortedResults[1].value == value2, "Second value should match value2")
+    #expect(sortedResults[0].key == ByteString(key1), "First key should match key1")
+    #expect(sortedResults[0].value == ByteString(value1), "First value should match value1")
+    #expect(sortedResults[1].key == ByteString(key2), "Second key should match key2")
+    #expect(sortedResults[1].value == ByteString(value2), "Second value should match value2")
 }
 
 @Test("getRange with limit")
@@ -706,10 +707,10 @@ func readRangeBatchWithKeySelectors() async throws {
 
     // Sort results by key for predictable testing
     let sortedResults = result.records.sorted { $0.key.lexicographicallyPrecedes($1.key) }
-    #expect(sortedResults[0].key == key1, "First key should match key1")
-    #expect(sortedResults[0].value == value1, "First value should match value1")
-    #expect(sortedResults[1].key == key2, "Second key should match key2")
-    #expect(sortedResults[1].value == value2, "Second value should match value2")
+    #expect(sortedResults[0].key == ByteString(key1), "First key should match key1")
+    #expect(sortedResults[0].value == ByteString(value1), "First value should match value1")
+    #expect(sortedResults[1].key == ByteString(key2), "Second key should match key2")
+    #expect(sortedResults[1].value == ByteString(value2), "Second value should match value2")
 }
 
 @Test("getRange with KeySelectors - String keys")

@@ -1,4 +1,5 @@
 import CFoundationDB
+import DatabaseTypes
 import Synchronization
 import Testing
 
@@ -31,7 +32,7 @@ struct FoundationDBResultStorageSharingTests {
             )
         })
         var future: Future<ValueResultDecoder>? = Future<ValueResultDecoder>(readFuture)
-        var value: FDB.ByteString? = try await future?.value
+        var value: ByteString? = try await future?.value
         let retainedValue = try #require(value)
 
         future = nil
@@ -57,7 +58,7 @@ struct FoundationDBResultStorageSharingTests {
         }
 
         #expect(retainedStorageIdentity == sourceStorageIdentity)
-        #expect(retainedValue == expectedValue)
+        #expect(retainedValue == ByteString(expectedValue))
     }
 
     @Test("Range records retain the FoundationDB batch storage")
@@ -147,8 +148,8 @@ struct FoundationDBResultStorageSharingTests {
             #expect(Int(sourceRecord.value_length) == decodedRecord.value.count)
             #expect(decodedKeyStorageIdentity == sourceKeyStorageIdentity)
             #expect(decodedValueStorageIdentity == sourceValueStorageIdentity)
-            #expect(decodedRecord.key == expectedRows[index].0)
-            #expect(decodedRecord.value == expectedRows[index].1)
+            #expect(decodedRecord.key == ByteString(expectedRows[index].0))
+            #expect(decodedRecord.value == ByteString(expectedRows[index].1))
         }
 
         var retainedRecord = try #require(decodedRecords?.first)
@@ -183,8 +184,8 @@ struct FoundationDBResultStorageSharingTests {
 
         #expect(retainedKeyStorageIdentity == sourceKeyStorageIdentity)
         #expect(retainedValueStorageIdentity == sourceValueStorageIdentity)
-        #expect(retainedRecord.key == firstKey)
-        #expect(retainedRecord.value == firstValue)
+        #expect(retainedRecord.key == ByteString(firstKey))
+        #expect(retainedRecord.value == ByteString(firstValue))
 
         retainedRecord = FDB.KeyValue(key: [], value: [])
     }
@@ -211,7 +212,7 @@ struct FoundationDBResultStorageSharingTests {
         let storedValue = try #require(
             await readTransaction.getValue(for: originalKey, snapshot: true)
         )
-        #expect(storedValue == originalValue)
+        #expect(storedValue == ByteString(originalValue))
         let mutatedKeyValue = try await readTransaction.getValue(
             for: key.currentBytes,
             snapshot: true

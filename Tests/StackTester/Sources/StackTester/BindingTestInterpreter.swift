@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 
+import DatabaseTypes
 import Foundation
 @testable import FoundationDB
 
@@ -174,7 +175,7 @@ class BindingTestInterpreter {
 
     // Constrain a key result to the requested prefix range.
     func constrainKeyToPrefix(
-        _ key: FDB.ByteString,
+        _ key: ByteString,
         prefix: [UInt8]
     ) throws -> [UInt8] {
         if key.starts(with: prefix) {

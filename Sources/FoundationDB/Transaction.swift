@@ -18,6 +18,7 @@
  * limitations under the License.
  */
 import CFoundationDB
+import DatabaseTypes
 
 public final class FDBTransaction: TransactionProtocol, Sendable {
     private let transactionAddress: UInt
@@ -40,7 +41,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
     public func getValue<Key: FDB.ByteInput>(
         for key: Key,
         snapshot: Bool
-    ) async throws -> FDB.ByteString? {
+    ) async throws -> ByteString? {
         let future = try withInputBytes(key) { keyBytes, keyLength in
             Future<ValueResultDecoder>(
                 fdb_transaction_get(
@@ -151,7 +152,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
     public func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteString {
+    ) async throws -> ByteString {
         let offset = try validatedParameter(
             selector.offset,
             named: "selector.offset"
@@ -236,7 +237,7 @@ public final class FDBTransaction: TransactionProtocol, Sendable {
         beginKey: Begin,
         endKey: End,
         chunkSize: Int64
-    ) async throws -> [FDB.ByteString] {
+    ) async throws -> [ByteString] {
         let future = try withInputBytes(
             beginKey
         ) { beginKeyBytes, beginKeyLength in

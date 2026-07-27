@@ -1871,18 +1871,18 @@ func addReadConflictRange() async throws {
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    try clearTransaction.clearRange(beginKey: "test_conflict_", endKey: "test_conflict`")
+    try clearTransaction.clearRange(beginKey: "conflict_read_", endKey: "conflict_read`")
     _ = try await clearTransaction.commit()
 
     // Set up initial data
     let setupTransaction = try database.createTransaction()
-    try setupTransaction.setValue("initial_value", for: "test_conflict_a")
+    try setupTransaction.setValue("initial_value", for: "conflict_read_a")
     _ = try await setupTransaction.commit()
 
     // Test adding read conflict range
     let transaction = try database.createTransaction()
-    let beginKey: FDB.Bytes = Array("test_conflict_a".utf8)
-    let endKey: FDB.Bytes = Array("test_conflict_b".utf8)
+    let beginKey: FDB.Bytes = Array("conflict_read_a".utf8)
+    let endKey: FDB.Bytes = Array("conflict_read_b".utf8)
 
     // Add read conflict range - should succeed
     try transaction.addConflictRange(beginKey: beginKey, endKey: endKey, type: .read)
@@ -1898,13 +1898,13 @@ func addWriteConflictRange() async throws {
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    try clearTransaction.clearRange(beginKey: "test_write_conflict_", endKey: "test_write_conflict`")
+    try clearTransaction.clearRange(beginKey: "conflict_write_", endKey: "conflict_write`")
     _ = try await clearTransaction.commit()
 
     // Test adding write conflict range
     let transaction = try database.createTransaction()
-    let beginKey: FDB.Bytes = Array("test_write_conflict_a".utf8)
-    let endKey: FDB.Bytes = Array("test_write_conflict_b".utf8)
+    let beginKey: FDB.Bytes = Array("conflict_write_a".utf8)
+    let endKey: FDB.Bytes = Array("conflict_write_b".utf8)
 
     // Add write conflict range - should succeed
     try transaction.addConflictRange(beginKey: beginKey, endKey: endKey, type: .write)
@@ -1920,17 +1920,17 @@ func conflictRangeDetectsConcurrentWrites() async throws {
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    try clearTransaction.clearRange(beginKey: "test_concurrent_", endKey: "test_concurrent`")
+    try clearTransaction.clearRange(beginKey: "conflict_concurrent_", endKey: "conflict_concurrent`")
     _ = try await clearTransaction.commit()
 
     // Set up initial data
     let setupTransaction = try database.createTransaction()
-    try setupTransaction.setValue("initial", for: "test_concurrent_key")
+    try setupTransaction.setValue("initial", for: "conflict_concurrent_key")
     _ = try await setupTransaction.commit()
 
     // Create first transaction and add a write conflict range
     let transaction1 = try database.createTransaction()
-    let beginKey: FDB.Bytes = Array("test_concurrent_key".utf8)
+    let beginKey: FDB.Bytes = Array("conflict_concurrent_key".utf8)
     var endKey: FDB.Bytes = beginKey
     endKey.append(0x00)
 
@@ -1938,7 +1938,7 @@ func conflictRangeDetectsConcurrentWrites() async throws {
 
     // Create second transaction that writes to the same key
     let transaction2 = try database.createTransaction()
-    try transaction2.setValue("modified_by_tr2", for: "test_concurrent_key")
+    try transaction2.setValue("modified_by_tr2", for: "conflict_concurrent_key")
     _ = try await transaction2.commit()
 
     // Now try to commit transaction1 - it should detect a conflict
@@ -1958,24 +1958,24 @@ func addMultipleConflictRanges() async throws {
 
     // Clear test key range
     let clearTransaction = try database.createTransaction()
-    try clearTransaction.clearRange(beginKey: "test_multi_", endKey: "test_multi`")
+    try clearTransaction.clearRange(beginKey: "conflict_multiple_", endKey: "conflict_multiple`")
     _ = try await clearTransaction.commit()
 
     // Test adding multiple conflict ranges
     let transaction = try database.createTransaction()
 
     // Add multiple read conflict ranges
-    let beginKey1: FDB.Bytes = Array("test_multi_a".utf8)
-    let endKey1: FDB.Bytes = Array("test_multi_b".utf8)
+    let beginKey1: FDB.Bytes = Array("conflict_multiple_a".utf8)
+    let endKey1: FDB.Bytes = Array("conflict_multiple_b".utf8)
     try transaction.addConflictRange(beginKey: beginKey1, endKey: endKey1, type: .read)
 
-    let beginKey2: FDB.Bytes = Array("test_multi_c".utf8)
-    let endKey2: FDB.Bytes = Array("test_multi_d".utf8)
+    let beginKey2: FDB.Bytes = Array("conflict_multiple_c".utf8)
+    let endKey2: FDB.Bytes = Array("conflict_multiple_d".utf8)
     try transaction.addConflictRange(beginKey: beginKey2, endKey: endKey2, type: .read)
 
     // Add write conflict range
-    let beginKey3: FDB.Bytes = Array("test_multi_x".utf8)
-    let endKey3: FDB.Bytes = Array("test_multi_y".utf8)
+    let beginKey3: FDB.Bytes = Array("conflict_multiple_x".utf8)
+    let endKey3: FDB.Bytes = Array("conflict_multiple_y".utf8)
     try transaction.addConflictRange(beginKey: beginKey3, endKey: endKey3, type: .write)
 
     // Should be able to commit with multiple conflict ranges

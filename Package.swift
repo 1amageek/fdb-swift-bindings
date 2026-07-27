@@ -32,7 +32,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/1amageek/database-types.git",
-            exact: "26.0726.0"
+            from: "26.0727.0"
         ),
     ],
     targets: [

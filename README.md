@@ -111,7 +111,7 @@ Add the package to your `Package.swift`:
 dependencies: [
     .package(
         url: "https://github.com/1amageek/fdb-swift-bindings.git",
-        from: "0.2.0"
+        from: "0.3.1"
     )
 ]
 ```

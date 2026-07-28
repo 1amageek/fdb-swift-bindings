@@ -59,6 +59,7 @@ struct FoundationDBResultStorageSharingTests {
 
         #expect(retainedStorageIdentity == sourceStorageIdentity)
         #expect(retainedValue == ByteString(expectedValue))
+        #expect(retainedValue.retainedByteCount == nil)
     }
 
     @Test("Range records retain the FoundationDB batch storage")
@@ -148,6 +149,8 @@ struct FoundationDBResultStorageSharingTests {
             #expect(Int(sourceRecord.value_length) == decodedRecord.value.count)
             #expect(decodedKeyStorageIdentity == sourceKeyStorageIdentity)
             #expect(decodedValueStorageIdentity == sourceValueStorageIdentity)
+            #expect(decodedRecord.key.retainedByteCount == nil)
+            #expect(decodedRecord.value.retainedByteCount == nil)
             #expect(decodedRecord.key == ByteString(expectedRows[index].0))
             #expect(decodedRecord.value == ByteString(expectedRows[index].1))
         }

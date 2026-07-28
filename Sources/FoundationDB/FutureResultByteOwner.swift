@@ -9,6 +9,10 @@ final class FutureResultByteOwner: ByteStringOwner {
     let count: Int
     private let future: FutureOwner
 
+    /// A field can retain an entire FoundationDB result batch through the
+    /// future. The C API does not expose that allocation's total byte count.
+    var retainedByteCount: Int? { nil }
+
     init(
         sourceBytes: UnsafePointer<UInt8>?,
         count: Int,
